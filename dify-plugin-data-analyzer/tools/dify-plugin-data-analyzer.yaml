@@ -14,20 +14,35 @@ description:
     ja_JP: "Intelligent Excel Analysis API - Automated multi-level header processing and AI-powered data analysis with code generation and execution"
   llm: "Intelligent Excel Analysis API - Automated multi-level header processing and AI-powered data analysis with code generation and execution"
 parameters:
-  - name: query
-    type: string
+  - name: input_file
+    type: file
     required: true
     label:
-      en_US: Query string
-      zh_Hans: 查询语句
-      pt_BR: Query string
-      ja_JP: クエリ文字列
+      en_US: Upload File
+      zh_Hans: 上传文件
+      pt_BR: Upload File
+      ja_JP: ファイルをアップロード
     human_description:
-      en_US: "Intelligent Excel Analysis API - Automated multi-level header processing and AI-powered data analysis with code generation and execution"
-      zh_Hans: "Intelligent Excel Analysis API - Automated multi-level header processing and AI-powered data analysis with code generation and execution"
-      pt_BR: "Intelligent Excel Analysis API - Automated multi-level header processing and AI-powered data analysis with code generation and execution"
-      ja_JP: "Intelligent Excel Analysis API - Automated multi-level header processing and AI-powered data analysis with code generation and execution"
-    llm_description: "Intelligent Excel Analysis API - Automated multi-level header processing and AI-powered data analysis with code generation and execution"
+      en_US: "Upload an Excel file to process and analyze"
+      zh_Hans: "上传需要处理的Excel文件"
+      pt_BR: "Envie um arquivo Excel para processar e analisar"
+      ja_JP: "処理および分析するExcelファイルをアップロード"
+    llm_description: "Excel file to be analyzed. Supports .xlsx, .xls, .xlsm, .xlsb formats."
+    form: form
+  - name: query
+    type: string
+    required: false
+    label:
+      en_US: Analysis Query
+      zh_Hans: 分析查询
+      pt_BR: Consulta de Análise
+      ja_JP: 分析クエリ
+    human_description:
+      en_US: "Optional: Custom analysis prompt or query for the data analysis"
+      zh_Hans: "可选：自定义分析提示词或查询语句"
+      pt_BR: "Opcional: Prompt de análise personalizado ou consulta para análise de dados"
+      ja_JP: "オプション：データ分析のカスタム分析プロンプトまたはクエリ"
+    llm_description: "Optional custom analysis prompt. If not provided, default comprehensive analysis will be performed."
     form: llm
 extra:
   python:

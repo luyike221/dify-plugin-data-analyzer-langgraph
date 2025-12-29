@@ -1,1 +1,17 @@
+# Dify Plugin SDK
 dify_plugin>=0.4.0,<0.7.0
+
+# Core dependencies
+requests
+python-dotenv
+
+# Data science libraries (used by generated code during execution)
+numpy
+pandas
+scikit-learn
+seaborn
+matplotlib
+openpyxl  # Excel file processing
+
+# OpenAI SDK for LLM API calls
+openai
