@@ -11,10 +11,14 @@ import os
 import time
 import uuid
 import shutil
+import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 import openai
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 from .config import (
     DEFAULT_TEMPERATURE, STOP_TOKEN_IDS, MAX_NEW_TOKENS,
@@ -142,7 +146,25 @@ async def run_data_analysis(
     
     while not finished:
         # 调用分析 API
+        logger.info("=" * 60)
+        logger.info("🤖 调用大模型 API 进行数据分析")
+        logger.info(f"📌 模型: {model}")
+        logger.info(f"🌡️  温度: {temperature}")
+        logger.info(f"📝 消息数量: {len(vllm_messages)}")
+        logger.info(f"🔗 API 地址: {analysis_api_url}")
+        
+        # 记录最后一条用户消息（完整内容）
+        if vllm_messages:
+            last_message = vllm_messages[-1]
+            if isinstance(last_message, dict) and "content" in last_message:
+                content_full = str(last_message["content"])
+                logger.info("📄 最后一条消息完整内容:")
+                logger.info("=" * 60)
+                logger.info(content_full)
+                logger.info("=" * 60)
+        
         try:
+            logger.info("📡 发送 API 请求...")
             response = await analysis_client_async.chat.completions.create(
                 model=model,
                 messages=vllm_messages,
@@ -154,6 +176,7 @@ async def run_data_analysis(
                     "max_new_tokens": MAX_NEW_TOKENS,
                 },
             )
+            logger.info("✅ API 请求成功，开始接收流式响应...")
         except openai.APIConnectionError as e:
             error_msg = (
                 f"❌ **连接分析 API 失败**\n\n"
@@ -196,16 +219,41 @@ async def run_data_analysis(
         
         cur_res = ""
         last_finish_reason = None
+        chunk_count = 0
         
+        logger.info("📥 开始接收流式响应...")
         async for chunk in response:
+            chunk_count += 1
             if chunk.choices and chunk.choices[0].delta.content is not None:
                 delta = chunk.choices[0].delta.content
                 cur_res += delta
                 assistant_reply += delta
-            last_finish_reason = chunk.choices[0].finish_reason
+            
+            # 记录 finish_reason
+            if chunk.choices and chunk.choices[0].finish_reason:
+                last_finish_reason = chunk.choices[0].finish_reason
+                logger.debug(f"📊 Chunk {chunk_count}: finish_reason = {last_finish_reason}")
+            
+            # 每 50 个 chunk 记录一次进度
+            if chunk_count % 50 == 0:
+                logger.debug(f"📊 已接收 {chunk_count} 个 chunks，当前响应长度: {len(cur_res)} 字符")
+            
             if "</Answer>" in cur_res:
                 finished = True
+                logger.info(f"✅ 检测到 </Answer> 标签，完成响应接收")
                 break
+        
+        logger.info(f"📊 响应统计:")
+        logger.info(f"   - 接收 chunks 数量: {chunk_count}")
+        logger.info(f"   - 响应总长度: {len(cur_res)} 字符")
+        logger.info(f"   - 完成原因: {last_finish_reason}")
+        
+        # 记录完整的响应内容
+        logger.info("=" * 60)
+        logger.info("📝 大模型完整响应内容:")
+        logger.info("=" * 60)
+        logger.info(cur_res)
+        logger.info("=" * 60)
         
         has_code_segment = "<Code>" in cur_res
         has_closed_code = "</Code>" in cur_res
@@ -223,23 +271,50 @@ async def run_data_analysis(
         
         # 执行代码
         if has_code_segment and has_closed_code and not finished:
+            logger.info("")
+            logger.info("🔍 检测到代码段，准备执行...")
             vllm_messages.append({"role": "assistant", "content": cur_res})
             code_str = extract_code_from_segment(cur_res)
             if code_str:
+                logger.info("📝 提取的代码:")
+                logger.info("=" * 60)
+                logger.info(code_str)
+                logger.info("=" * 60)
                 code_str = Chinese_matplot_str + "\n" + code_str
+                logger.info("▶️  开始执行代码...")
                 exe_output = await execute_code_safe_async(code_str, workspace_dir)
+                logger.info("✅ 代码执行完成")
+                logger.info("📊 执行输出:")
+                logger.info("=" * 60)
+                logger.info(exe_output)
+                logger.info("=" * 60)
                 artifacts = tracker.diff_and_collect()
+                if artifacts:
+                    logger.info(f"📁 生成的文件数量: {len(artifacts)}")
+                    for artifact in artifacts:
+                        logger.info(f"   - {artifact}")
                 exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
                 render_file_block(artifacts, workspace_dir, thread_id, generated_files)
                 assistant_reply += exe_str
                 vllm_messages.append({"role": "execute", "content": exe_output})
             else:
+                logger.warning("⚠️ 无法提取代码，结束对话")
                 finished = True
     
     # 生成报告
+    logger.info("")
+    logger.info("📄 生成分析报告...")
     report_block = generate_report_from_messages(
         messages, assistant_reply, workspace_dir, thread_id, generated_files
     )
+    logger.info("✅ 报告生成完成")
+    
+    logger.info("")
+    logger.info("=" * 60)
+    logger.info("🎉 数据分析完成")
+    logger.info(f"📊 最终响应长度: {len(assistant_reply)} 字符")
+    logger.info(f"📁 生成文件数量: {len(generated_files)}")
+    logger.info("=" * 60)
     
     return {
         "reasoning": assistant_reply,

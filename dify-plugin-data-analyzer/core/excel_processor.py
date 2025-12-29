@@ -13,11 +13,15 @@ import json
 import re
 import os
 import requests
+import logging
 from openpyxl import load_workbook
 from typing import Tuple, List, Dict, Optional, Any
 from collections import defaultdict
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
+
+# 配置日志
+logger = logging.getLogger(__name__)
 
 # 导入配置（避免循环导入，使用延迟导入）
 try:
@@ -38,10 +42,14 @@ class HeaderAnalysis:
     data_start_row: int     # 数据开始行（1-indexed）
     confidence: str         # 置信度: high/medium/low
     reason: str             # 分析原因说明
+    valid_cols: Optional[List[int]] = None  # 有效列的索引列表（1-indexed），None表示所有列都有效
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
-        return asdict(self)
+        result = asdict(self)
+        if result.get('valid_cols') is None:
+            result['valid_cols'] = None
+        return result
 
 
 @dataclass
@@ -226,7 +234,14 @@ class SmartHeaderProcessor:
         base_url = llm_base_url if llm_base_url is not None else EXCEL_LLM_BASE_URL
         model = llm_model if llm_model is not None else EXCEL_LLM_MODEL
         
+        logger.info("=" * 60)
+        logger.info("🤖 调用 LLM API 进行表头验证")
+        logger.info(f"🔗 EXCEL_LLM_BASE_URL: {base_url}")
+        logger.info(f"📌 模型: {model}")
+        logger.info(f"🔑 API Key: {'已配置' if api_key else '未配置'}")
+        
         if not api_key:
+            logger.warning("⚠️ 未配置 LLM API Key，跳过 LLM 验证")
             return None
             
         url = base_url
@@ -242,13 +257,26 @@ class SmartHeaderProcessor:
             "messages": [{"role": "user", "content": prompt}]
         }
         
+        logger.info(f"📡 发送 LLM API 请求到: {url}")
+        logger.info(f"📝 提示词长度: {len(prompt)} 字符")
+        
         try:
             response = requests.post(url, headers=headers, json=payload, timeout=30)
             response.raise_for_status()
             result = response.json()
-            return result['choices'][0]['message']['content']
+            llm_response = result['choices'][0]['message']['content']
+            
+            logger.info("✅ LLM API 调用成功")
+            logger.info("=" * 60)
+            logger.info("📝 LLM 响应内容:")
+            logger.info("=" * 60)
+            logger.info(llm_response)
+            logger.info("=" * 60)
+            
+            return llm_response
         except Exception as e:
-            print(f"LLM调用失败: {e}")
+            logger.error(f"❌ LLM调用失败: {e}")
+            logger.debug("异常详情:", exc_info=True)
             return None
     
     def _parse_validation_response(self, response: str, rule_analysis: HeaderAnalysis) -> HeaderAnalysis:
@@ -283,17 +311,20 @@ class SmartHeaderProcessor:
                     header_type=rule_analysis.header_type,
                     data_start_row=rule_analysis.data_start_row,
                     confidence=data.get('confidence', 'high'),  # LLM验证通过，置信度提升
-                    reason=f"规则分析+LLM验证: {data.get('reason', '验证通过')}"
+                    reason=f"规则分析+LLM验证: {data.get('reason', '验证通过')}",
+                    valid_cols=rule_analysis.valid_cols  # 保持原有的列过滤结果
                 )
             else:
                 # LLM认为不合理，使用LLM的建议
+                # 注意：LLM可能建议修改表头行数，但列过滤结果仍然保留
                 return HeaderAnalysis(
                     skip_rows=suggestions.get('skip_rows', rule_analysis.skip_rows),
                     header_rows=suggestions.get('header_rows', rule_analysis.header_rows),
                     header_type=suggestions.get('header_type', rule_analysis.header_type),
                     data_start_row=suggestions.get('data_start_row', rule_analysis.data_start_row),
                     confidence=data.get('confidence', 'medium'),
-                    reason=f"规则分析+LLM修正: {data.get('reason', 'LLM建议修正')}"
+                    reason=f"规则分析+LLM修正: {data.get('reason', 'LLM建议修正')}",
+                    valid_cols=rule_analysis.valid_cols  # 保持原有的列过滤结果
                 )
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             print(f"解析LLM验证响应失败: {e}，使用原规则分析结果")
@@ -345,14 +376,69 @@ class SmartHeaderProcessor:
         
         header_type = 'multi' if header_rows > 1 else 'single'
         
+        # 注意：列检测在LLM验证完成后进行，这里不进行列检测
         return HeaderAnalysis(
             skip_rows=skip_rows,
             header_rows=max(1, header_rows),
             header_type=header_type,
             data_start_row=data_start,
             confidence='medium',
-            reason='基于规则分析'
+            reason='基于规则分析',
+            valid_cols=None  # 列检测在LLM验证完成后进行
         )
+    
+    def _detect_valid_columns(self, skip_rows: int, header_rows: int, data_start_row: int) -> List[int]:
+        """
+        检测有效列（过滤无效列）
+        
+        无效列的判断标准：
+        1. 表头区域完全为空
+        2. 数据区域完全为空或没有数值数据
+        
+        返回: 有效列的索引列表（1-indexed）
+        """
+        max_col = self.ws.max_column
+        header_start = skip_rows + 1
+        header_end = skip_rows + header_rows
+        valid_cols = []
+        
+        logger.info("🔍 开始检测无效列...")
+        
+        for col in range(1, max_col + 1):
+            # 检查表头区域是否有内容
+            has_header = False
+            for row in range(header_start, header_end + 1):
+                value = self.get_cell_value(row, col)
+                if value is not None and str(value).strip():
+                    has_header = True
+                    break
+            
+            # 检查数据区域是否有数值数据
+            has_data = False
+            numeric_count = 0
+            total_count = 0
+            for row in range(data_start_row, min(data_start_row + 10, self.ws.max_row + 1)):
+                value = self.ws.cell(row, col).value
+                if value is not None:
+                    total_count += 1
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        numeric_count += 1
+                        has_data = True
+            
+            # 如果表头有内容或数据区域有数值，则认为是有效列
+            if has_header or has_data:
+                valid_cols.append(col)
+                logger.debug(f"✅ 列 {col}: 有效 (表头: {has_header}, 数据: {has_data}, 数值: {numeric_count}/{total_count})")
+            else:
+                logger.info(f"❌ 列 {col}: 无效 (表头为空且数据为空)")
+        
+        logger.info(f"📊 列过滤结果: 总列数 {max_col}, 有效列数 {len(valid_cols)}, 无效列数 {max_col - len(valid_cols)}")
+        
+        # 如果所有列都有效，返回None（表示不需要过滤）
+        if len(valid_cols) == max_col:
+            return None
+        
+        return valid_cols
     
     def extract_headers(self, analysis: HeaderAnalysis) -> Tuple[List[str], Dict[str, Dict]]:
         """
@@ -363,12 +449,17 @@ class SmartHeaderProcessor:
         header_start = analysis.skip_rows + 1
         header_end = analysis.skip_rows + analysis.header_rows
         
+        # 确定要处理的列（如果指定了有效列，只处理有效列）
+        cols_to_process = analysis.valid_cols if analysis.valid_cols is not None else list(range(1, max_col + 1))
+        
+        logger.info(f"📋 提取表头: 处理 {len(cols_to_process)} 列")
+        
         column_metadata = {}
         
         if analysis.header_type == 'single':
             # 单表头
             headers = []
-            for col in range(1, max_col + 1):
+            for col in cols_to_process:
                 value = self.get_cell_value(header_start, col)
                 col_name = str(value) if value else f'Column_{col}'
                 headers.append(col_name)
@@ -382,7 +473,7 @@ class SmartHeaderProcessor:
         else:
             # 多表头：展平
             column_headers = []
-            for col in range(1, max_col + 1):
+            for col in cols_to_process:
                 parts = []
                 levels = {}
                 for row_idx, row in enumerate(range(header_start, header_end + 1), 1):
@@ -442,7 +533,7 @@ class SmartHeaderProcessor:
             (DataFrame, 分析结果, 列结构元数据)
         """
         if analysis is None:
-            # 先进行规则分析
+            # 先进行规则分析（只做行检测，不做列检测）
             analysis = self.analyze_with_rules()
             
             # 如果启用LLM验证，用LLM验证规则分析结果
@@ -451,18 +542,36 @@ class SmartHeaderProcessor:
             if use_llm_validate and api_key:
                 analysis = self.validate_with_llm(analysis, llm_api_key, llm_base_url, llm_model)
         
+        # LLM验证完成后，进行列检测（使用最终的表头行数和数据起始行）
+        if analysis.valid_cols is None:
+            logger.info("🔍 LLM验证完成，开始进行列检测...")
+            valid_cols = self._detect_valid_columns(
+                analysis.skip_rows, 
+                analysis.header_rows, 
+                analysis.data_start_row
+            )
+            # 更新分析结果，添加列检测结果
+            analysis.valid_cols = valid_cols
+            logger.info("✅ 列检测完成")
+        
         headers, column_metadata = self.extract_headers(analysis)
+        
+        # 确定要读取的列（如果指定了有效列，只读取有效列）
+        cols_to_read = analysis.valid_cols if analysis.valid_cols is not None else list(range(1, self.ws.max_column + 1))
+        
+        logger.info(f"📊 读取数据: 从 {len(cols_to_read)} 列读取数据")
         
         # 读取数据
         data = []
         for row in range(analysis.data_start_row, self.ws.max_row + 1):
             row_data = []
-            for col in range(1, self.ws.max_column + 1):
+            for col in cols_to_read:
                 row_data.append(self.ws.cell(row, col).value)
             if any(v is not None for v in row_data):
                 data.append(row_data)
         
         df = pd.DataFrame(data, columns=headers)
+        logger.info(f"✅ DataFrame 创建完成: {len(df)} 行 x {len(df.columns)} 列")
         return df, analysis, column_metadata
     
     def close(self):
