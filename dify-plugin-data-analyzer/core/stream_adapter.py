@@ -117,7 +117,8 @@ def async_generator_to_sync(
     def run_async():
         """在新线程中运行异步代码"""
         try:
-            # 创建新的事件循环
+            # 在新线程中，总是创建全新的事件循环
+            # 这样可以避免与主线程的事件循环冲突
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
@@ -131,8 +132,25 @@ def async_generator_to_sync(
                 finally:
                     buffer.close()
             
-            loop.run_until_complete(consume())
-            loop.close()
+            # 在新线程中运行，确保事件循环未运行
+            try:
+                loop.run_until_complete(consume())
+            finally:
+                # 清理事件循环
+                try:
+                    # 取消所有待处理的任务
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    # 等待任务取消完成
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
+                
+                # 关闭事件循环
+                if not loop.is_closed():
+                    loop.close()
         except Exception as e:
             buffer.set_error(e)
             buffer.close()

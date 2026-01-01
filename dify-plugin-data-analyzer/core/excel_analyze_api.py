@@ -13,7 +13,7 @@ import uuid
 import shutil
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict, Any, AsyncGenerator
+from typing import List, Optional, Dict, Any, Generator
 
 import openai
 
@@ -34,7 +34,7 @@ from .storage import storage
 from .utils import (
     get_thread_workspace, build_file_path, WorkspaceTracker,
     render_file_block, generate_report_from_messages, extract_code_from_segment,
-    execute_code_safe_async, collect_file_info
+    execute_code_safe, collect_file_info
 )
 from .excel_processor import (
     process_excel_file, get_sheet_names, generate_analysis_prompt,
@@ -347,7 +347,7 @@ async def run_data_analysis(
                 logger.info("=" * 60)
                 code_str = Chinese_matplot_str + "\n" + code_str
                 logger.info("▶️  开始执行代码...")
-                exe_output = await execute_code_safe_async(code_str, workspace_dir)
+                exe_output = execute_code_safe(code_str, workspace_dir)
                 logger.info("✅ 代码执行完成")
                 logger.info("📊 执行输出:")
                 logger.info("=" * 60)
@@ -805,7 +805,7 @@ async def continue_analysis(
             code_str = extract_code_from_segment(cur_res)
             if code_str:
                 code_str = Chinese_matplot_str + "\n" + code_str
-                exe_output = await execute_code_safe_async(code_str, workspace_dir)
+                exe_output = execute_code_safe(code_str, workspace_dir)
                 artifacts = tracker.diff_and_collect()
                 exe_str = f"\n<Execute>\n```\n{exe_output}\n```\n</Execute>\n"
                 render_file_block(artifacts, workspace_dir, thread_id, generated_files)
@@ -832,7 +832,7 @@ async def continue_analysis(
 # 流式输出版本的函数
 # ============================================================================
 
-async def run_data_analysis_stream(
+def run_data_analysis_stream(
     workspace_dir: str,
     thread_id: str,
     process_result: ExcelProcessResult,
@@ -841,7 +841,7 @@ async def run_data_analysis_stream(
     temperature: float,
     analysis_api_url: str,
     analysis_api_key: Optional[str] = None
-) -> AsyncGenerator[str, None]:
+) -> Generator[str, None, None]:
     """
     执行数据分析流程 - 流式版本
     
@@ -896,7 +896,7 @@ async def run_data_analysis_stream(
     try:
         api_base = extract_api_base(analysis_api_url)
         api_key = analysis_api_key or "dummy"
-        analysis_client_async = openai.AsyncOpenAI(base_url=api_base, api_key=api_key, timeout=60.0)
+        analysis_client = openai.OpenAI(base_url=api_base, api_key=api_key, timeout=60.0)
     except Exception as e:
         yield f"❌ **错误**: 创建分析 API 客户端失败: {str(e)}\n"
         return
@@ -911,7 +911,7 @@ async def run_data_analysis_stream(
         logger.info(f"🤖 调用大模型 API - 轮次 {round_num}")
         
         try:
-            response = await analysis_client_async.chat.completions.create(
+            response = analysis_client.chat.completions.create(
                 model=model,
                 messages=vllm_messages,
                 temperature=temperature,
@@ -937,7 +937,7 @@ async def run_data_analysis_stream(
         last_finish_reason = None
         
         # 流式输出 LLM 响应
-        async for chunk in response:
+        for chunk in response:
             if chunk.choices and chunk.choices[0].delta.content is not None:
                 delta = chunk.choices[0].delta.content
                 cur_res += delta
@@ -978,7 +978,7 @@ async def run_data_analysis_stream(
                 code_str = Chinese_matplot_str + "\n" + code_str
                 
                 yield "⏳ 正在执行代码...\n"
-                exe_output = await execute_code_safe_async(code_str, workspace_dir)
+                exe_output = execute_code_safe(code_str, workspace_dir)
                 
                 yield "\n📊 **执行结果:**\n"
                 yield f"```\n{exe_output}\n```\n"
@@ -1012,7 +1012,7 @@ async def run_data_analysis_stream(
             yield f"   - {file_info.get('name', 'N/A')}\n"
 
 
-async def analyze_excel_stream(
+def analyze_excel_stream(
     file_content: bytes,
     filename: str,
     analysis_api_url: str,
@@ -1027,7 +1027,7 @@ async def analyze_excel_stream(
     llm_base_url: Optional[str] = None,
     llm_model: Optional[str] = None,
     analysis_api_key: Optional[str] = None
-) -> AsyncGenerator[str, None]:
+) -> Generator[str, None, None]:
     """
     Excel智能分析函数 - 流式版本
     
@@ -1122,7 +1122,7 @@ async def analyze_excel_stream(
         prompt = analysis_prompt or DEFAULT_EXCEL_ANALYSIS_PROMPT
         
         # 调用流式数据分析
-        async for chunk in run_data_analysis_stream(
+        for chunk in run_data_analysis_stream(
             workspace_dir=workspace_dir,
             thread_id=current_thread_id,
             process_result=process_result,

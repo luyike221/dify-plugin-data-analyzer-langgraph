@@ -988,6 +988,7 @@ def generate_analysis_prompt(
         prompt_parts.append(json.dumps(column_metadata_with_samples, ensure_ascii=False, indent=2))
         prompt_parts.append("```")
         prompt_parts.append("")
+        
         prompt_parts.append("**说明：**")
         prompt_parts.append("- 每个字段的元数据包含 `value_samples` 字段，其中包含该字段的统计信息和常见值")
         prompt_parts.append("- `value_samples.top_values` 数组展示了出现频率最高的值及其出现次数")

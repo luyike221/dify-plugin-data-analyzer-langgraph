@@ -3,7 +3,6 @@ Dify Plugin Tool Implementation for Excel Data Analyzer
 Integrates core analysis functionality into Dify plugin tool interface
 """
 import os
-import asyncio
 import requests
 import logging
 from collections.abc import Generator
@@ -16,7 +15,6 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 # Import core functionality
 from core.excel_analyze_api import analyze_excel, analyze_excel_stream
 from core.config import DEFAULT_EXCEL_ANALYSIS_PROMPT
-from core.stream_adapter import async_generator_to_sync
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -419,9 +417,8 @@ class DifyPluginDataAnalyzerTool(Tool):
             thread_id_pattern = re.compile(r'(?:会话ID|Session ID)[:：]\s*(thread-[a-f0-9]{24})', re.IGNORECASE)
             
             # === 核心：使用流式分析函数 ===
-            # 将异步 Generator 转换为同步 Generator 并逐块输出
-            for chunk in async_generator_to_sync(
-                analyze_excel_stream,
+            # 直接使用同步 Generator 并逐块输出
+            for chunk in analyze_excel_stream(
                 file_content=file_content,
                 filename=filename,
                 analysis_api_url=analysis_api_url,
