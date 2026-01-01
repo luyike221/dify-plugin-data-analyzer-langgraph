@@ -24,7 +24,8 @@ from .config import (
     DEFAULT_TEMPERATURE, STOP_TOKEN_IDS, MAX_NEW_TOKENS,
     EXCEL_VALID_EXTENSIONS, EXCEL_MAX_FILE_SIZE_MB,
     EXCEL_LLM_API_KEY, EXCEL_LLM_BASE_URL, EXCEL_LLM_MODEL,
-    DEFAULT_EXCEL_ANALYSIS_PROMPT
+    DEFAULT_EXCEL_ANALYSIS_PROMPT,
+    ANALYZER_TYPE,  # 分析器类型配置
 )
 # Import ProcessedFileInfo as it's still used in the code
 from .models import ProcessedFileInfo
@@ -1026,7 +1027,8 @@ def analyze_excel_stream(
     llm_api_key: Optional[str] = None,
     llm_base_url: Optional[str] = None,
     llm_model: Optional[str] = None,
-    analysis_api_key: Optional[str] = None
+    analysis_api_key: Optional[str] = None,
+    analyzer_type: Optional[str] = None,  # 新增：分析器类型参数
 ) -> Generator[str, None, None]:
     """
     Excel智能分析函数 - 流式版本
@@ -1048,10 +1050,39 @@ def analyze_excel_stream(
     - llm_base_url: LLM API地址（可选）
     - llm_model: LLM模型名称（可选）
     - analysis_api_key: 数据分析API密钥（可选）
+    - analyzer_type: 分析器类型（可选，"langgraph" 或 "legacy"，默认从配置读取）
     
     Yields:
         str: 流式输出的字符串块
     """
+    # 确定使用哪种分析器
+    use_analyzer = analyzer_type or ANALYZER_TYPE
+    
+    # 如果使用 LangGraph 分析器，委托给新的实现
+    if use_analyzer == "langgraph":
+        logger.info("🔄 使用 LangGraph 分析器")
+        from .analyzer import analyze_excel_with_langgraph
+        
+        yield from analyze_excel_with_langgraph(
+            file_content=file_content,
+            filename=filename,
+            analysis_api_url=analysis_api_url,
+            analysis_model=analysis_model,
+            thread_id=thread_id,
+            use_llm_validate=use_llm_validate,
+            sheet_name=sheet_name,
+            analysis_prompt=analysis_prompt,
+            temperature=temperature,
+            llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_model=llm_model,
+            analysis_api_key=analysis_api_key,
+        )
+        return
+    
+    # 以下是原有的 legacy 分析器实现
+    logger.info("🔄 使用 Legacy（DeepAnalyze）分析器")
+    
     file_size = len(file_content)
     
     # === 静默处理：文件验证 ===

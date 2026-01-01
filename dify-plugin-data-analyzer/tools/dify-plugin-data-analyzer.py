@@ -285,6 +285,7 @@ class DifyPluginDataAnalyzerTool(Tool):
             analysis_api_url = credentials.get("analysis_api_url") or os.environ.get("ANALYSIS_API_URL")
             analysis_model = credentials.get("analysis_model") or os.environ.get("ANALYSIS_MODEL")
             analysis_api_key = credentials.get("analysis_api_key") or os.environ.get("ANALYSIS_API_KEY")
+            analyzer_type = credentials.get("analyzer_type") or os.environ.get("ANALYZER_TYPE", "langgraph")
         else:
             llm_api_key = os.environ.get("EXCEL_LLM_API_KEY")
             llm_base_url = os.environ.get("EXCEL_LLM_BASE_URL", "https://api.openai.com/v1/chat/completions")
@@ -292,6 +293,7 @@ class DifyPluginDataAnalyzerTool(Tool):
             analysis_api_url = os.environ.get("ANALYSIS_API_URL")
             analysis_model = os.environ.get("ANALYSIS_MODEL")
             analysis_api_key = os.environ.get("ANALYSIS_API_KEY")
+            analyzer_type = os.environ.get("ANALYZER_TYPE", "langgraph")
         
         # 验证必选配置
         if not analysis_api_url:
@@ -418,6 +420,7 @@ class DifyPluginDataAnalyzerTool(Tool):
             
             # === 核心：使用流式分析函数 ===
             # 直接使用同步 Generator 并逐块输出
+            # analyzer_type 决定使用 LangGraph 还是 Legacy 分析器
             for chunk in analyze_excel_stream(
                 file_content=file_content,
                 filename=filename,
@@ -432,7 +435,8 @@ class DifyPluginDataAnalyzerTool(Tool):
                 llm_api_key=llm_api_key,
                 llm_base_url=llm_base_url,
                 llm_model=llm_model,
-                analysis_api_key=analysis_api_key
+                analysis_api_key=analysis_api_key,
+                analyzer_type=analyzer_type,  # 分析器类型：langgraph 或 legacy
             ):
                 # 流式输出每个块
                 yield self.create_stream_variable_message('stream_output', chunk)

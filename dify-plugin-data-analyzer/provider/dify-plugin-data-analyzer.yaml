@@ -127,6 +127,33 @@ credentials_schema:
       zh_Hans: "如果分析API需要认证，请输入API密钥。可选，某些API可能不需要。"
       pt_BR: "Chave de API para API de análise se autenticação for necessária. Opcional, algumas APIs podem não exigir."
       ja_JP: "分析APIで認証が必要な場合のAPIキー。オプション、一部のAPIでは不要な場合があります。"
+  - name: "analyzer_type"
+    type: "select"
+    required: false
+    label:
+      en_US: "Analyzer Type"
+      zh_Hans: "分析器类型"
+      pt_BR: "Tipo de Analisador"
+      ja_JP: "アナライザータイプ"
+    options:
+      - value: "langgraph"
+        label:
+          en_US: "LangGraph (Recommended - Works with any LLM)"
+          zh_Hans: "LangGraph（推荐 - 支持任意LLM）"
+          pt_BR: "LangGraph (Recomendado - Funciona com qualquer LLM)"
+          ja_JP: "LangGraph（推奨 - 任意のLLMで動作）"
+      - value: "legacy"
+        label:
+          en_US: "Legacy (DeepAnalyze model required)"
+          zh_Hans: "Legacy（需要DeepAnalyze模型）"
+          pt_BR: "Legacy (Requer modelo DeepAnalyze)"
+          ja_JP: "Legacy（DeepAnalyzeモデル必須）"
+    default: "langgraph"
+    help:
+      en_US: "Choose the analyzer type. LangGraph works with any OpenAI-compatible LLM (GPT-4, Claude, etc.). Legacy requires the DeepAnalyze model."
+      zh_Hans: "选择分析器类型。LangGraph 支持任意 OpenAI 兼容的 LLM（GPT-4、Claude 等）。Legacy 需要 DeepAnalyze 模型。"
+      pt_BR: "Escolha o tipo de analisador. LangGraph funciona com qualquer LLM compatível com OpenAI (GPT-4, Claude, etc.). Legacy requer o modelo DeepAnalyze."
+      ja_JP: "アナライザータイプを選択。LangGraphは任意のOpenAI互換LLM（GPT-4、Claudeなど）で動作。LegacyはDeepAnalyzeモデルが必要。"
 
 #########################################################################################
 # If you want to support OAuth, you can uncomment the following code.

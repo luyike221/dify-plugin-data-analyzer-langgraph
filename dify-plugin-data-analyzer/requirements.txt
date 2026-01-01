@@ -5,6 +5,11 @@ dify_plugin>=0.4.0,<0.7.0
 requests
 python-dotenv
 
+# LangGraph for workflow orchestration (1.0.0+)
+langgraph>=1.0.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+
 # Data science libraries (used by generated code during execution)
 numpy
 pandas

@@ -65,11 +65,24 @@ VALID_FILE_PURPOSES = ["fine-tune", "answers", "file-extract", "assistants"]
 DEFAULT_TEMPERATURE = 0.4
 DEFAULT_MODEL = "DeepAnalyze-8B"
 
-# Stop token IDs for DeepAnalyze model
+# Stop token IDs for DeepAnalyze model (保留用于兼容性)
 STOP_TOKEN_IDS = [151676, 151645]
 
 # Supported tools
 SUPPORTED_TOOLS = ["code_interpreter"]
+
+# ============================================================================
+# LangGraph 分析器配置
+# ============================================================================
+
+# 分析器类型: "langgraph" 或 "legacy"
+# - "langgraph": 使用 LangGraph 1.0.0+ 工作流（推荐，支持普通 LLM）
+# - "legacy": 使用原有的 DeepAnalyze 专用分析器
+ANALYZER_TYPE = os.environ.get("ANALYZER_TYPE", "langgraph")
+
+# LangGraph 分析器配置
+LANGGRAPH_MAX_RETRIES = int(os.environ.get("LANGGRAPH_MAX_RETRIES", "3"))
+LANGGRAPH_MAX_ROUNDS = int(os.environ.get("LANGGRAPH_MAX_ROUNDS", "10"))
 
 # Excel processing configuration
 EXCEL_VALID_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb']
