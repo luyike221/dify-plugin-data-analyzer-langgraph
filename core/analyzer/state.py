@@ -53,6 +53,9 @@ class AnalysisState(TypedDict, total=False):
     使用 TypedDict 定义状态结构，支持 LangGraph 的状态管理和持久化
     
     Attributes:
+        # === 请求标识 ===
+        request_id: 请求唯一标识（用于多线程隔离，每个请求有独立的队列）
+        
         # === 输入数据 ===
         workspace_dir: 工作空间目录
         thread_id: 会话ID
@@ -90,6 +93,9 @@ class AnalysisState(TypedDict, total=False):
         generated_files: 生成的文件列表
         stream_output: 流式输出内容
     """
+    
+    # === 请求标识（多线程隔离） ===
+    request_id: str  # 请求唯一标识，用于获取该请求的独立队列
     
     # === 输入数据 ===
     workspace_dir: str
@@ -150,6 +156,7 @@ def create_initial_state(
     model: str,
     api_key: Optional[str] = None,
     temperature: float = 0.4,
+    request_id: Optional[str] = None,  # 新增：请求唯一标识
 ) -> AnalysisState:
     """
     创建初始分析状态
@@ -167,11 +174,21 @@ def create_initial_state(
         model: 模型名称
         api_key: LLM API 密钥
         temperature: 生成温度
+        request_id: 请求唯一标识（用于多线程隔离）
         
     Returns:
         初始化的 AnalysisState
     """
+    import uuid
+    
+    # 如果没有提供 request_id，生成一个唯一的
+    if request_id is None:
+        request_id = f"req-{uuid.uuid4().hex[:16]}"
+    
     return AnalysisState(
+        # 请求标识
+        request_id=request_id,
+        
         # 输入数据
         workspace_dir=workspace_dir,
         thread_id=thread_id,

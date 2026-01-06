@@ -23,9 +23,55 @@ from .prompts import PromptTemplates
 # 配置日志
 logger = logging.getLogger(__name__)
 
-# 全局流式输出队列（用于实时传递 token）
-_stream_queue: Optional[queue.Queue] = None
-_stream_lock = threading.Lock()
+# ============================================================================
+# 请求级别的队列管理（解决多线程并发问题）
+# ============================================================================
+# 使用字典存储每个请求的独立队列，避免全局队列被多个请求共享导致的竞态条件
+_request_queues: Dict[str, queue.Queue] = {}
+_queues_lock = threading.Lock()
+
+
+def _create_request_queue(request_id: str) -> queue.Queue:
+    """为请求创建独立的队列"""
+    with _queues_lock:
+        q = queue.Queue(maxsize=1000)
+        _request_queues[request_id] = q
+        logger.debug(f"🔧 创建请求队列: {request_id}")
+        return q
+
+
+def _get_request_queue(request_id: str) -> Optional[queue.Queue]:
+    """获取请求的队列"""
+    with _queues_lock:
+        return _request_queues.get(request_id)
+
+
+def _remove_request_queue(request_id: str):
+    """移除请求的队列"""
+    with _queues_lock:
+        if request_id in _request_queues:
+            # 清空队列
+            q = _request_queues[request_id]
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+            del _request_queues[request_id]
+            logger.debug(f"🧹 移除请求队列: {request_id}")
+
+
+def _push_to_request_queue(request_id: str, chunk: Optional[str]):
+    """推送到指定请求的队列（chunk 为 None 表示结束标记）"""
+    q = _get_request_queue(request_id)
+    if q is not None:
+        try:
+            q.put(chunk, timeout=0.1)
+        except queue.Full:
+            # 队列已满，跳过（避免阻塞）
+            if chunk is not None:
+                logger.warning(f"⚠️ 请求 {request_id} 的队列已满，跳过 chunk")
+            pass
 
 
 # ============================================================================
@@ -62,6 +108,7 @@ def call_llm(
     stream: bool = False,
     stream_callback: Optional[callable] = None,
     push_to_queue: bool = True,
+    request_id: Optional[str] = None,  # 新增：请求ID，用于定位独立队列
 ) -> str:
     """
     调用 LLM 并返回响应内容
@@ -74,6 +121,7 @@ def call_llm(
         stream: 是否流式输出
         stream_callback: 流式输出回调函数，接收每个 token (chunk: str) -> None
         push_to_queue: 是否推送到流式输出队列（默认True）
+        request_id: 请求ID，用于定位该请求的独立队列（多线程安全）
     
     Returns:
         完整的响应内容
@@ -120,9 +168,9 @@ def call_llm(
                 if stream_callback:
                     stream_callback(delta)
                 
-                # 推送到全局队列（如果启用）
-                if push_to_queue:
-                    _push_to_stream_queue(delta)
+                # 推送到请求独立的队列（如果启用且提供了 request_id）
+                if push_to_queue and request_id:
+                    _push_to_request_queue(request_id, delta)
         
         return full_content
     else:
@@ -133,38 +181,6 @@ def call_llm(
             "非流式调用已被禁用。必须使用流式调用（stream=True）以启用 thinking 功能。"
             "请确保所有 call_llm 调用都使用 stream=True 参数。"
         )
-
-
-def _push_to_stream_queue(chunk: str):
-    """将 token 推送到全局流式输出队列"""
-    global _stream_queue
-    if _stream_queue is not None:
-        try:
-            _stream_queue.put(chunk, timeout=0.1)
-        except queue.Full:
-            # 队列已满，跳过（避免阻塞）
-            pass
-
-
-def _init_stream_queue():
-    """初始化全局流式输出队列"""
-    global _stream_queue
-    with _stream_lock:
-        _stream_queue = queue.Queue(maxsize=1000)  # 最大1000个chunk
-
-
-def _clear_stream_queue():
-    """清空并关闭全局流式输出队列"""
-    global _stream_queue
-    with _stream_lock:
-        if _stream_queue is not None:
-            # 清空队列
-            while not _stream_queue.empty():
-                try:
-                    _stream_queue.get_nowait()
-                except queue.Empty:
-                    break
-            _stream_queue = None
 
 
 def call_llm_stream(
@@ -255,6 +271,9 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
     """
     logger.info("🔍 [Node] 意图分析节点开始执行")
     
+    # 获取请求ID（用于多线程隔离）
+    request_id = state.get("request_id", "")
+    
     # 创建 LLM 客户端
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
@@ -274,7 +293,7 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
     def stream_callback(chunk: str):
         """流式输出回调，只收集 token，不推送到队列（避免输出JSON）"""
         stream_chunks.append(chunk)
-        # 注意：不调用 _push_to_stream_queue，避免直接输出JSON内容
+        # 注意：不推送到队列，避免直接输出JSON内容
     
     # 流式调用 LLM，收集输出但不实时推送（避免输出JSON）
     # 使用流式调用以支持 think 功能，但不直接输出内容
@@ -286,6 +305,7 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
         stream=True,
         stream_callback=stream_callback,
         push_to_queue=False,  # 不推送到队列，避免输出JSON
+        request_id=request_id,
     )
     
     # 在控制台打印LLM的完整响应
@@ -329,7 +349,7 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
             "您的问题与当前数据文件不相关。请提供与数据相关的分析需求，或上传正确的数据文件。"
         )
         logger.warning(f"⚠️ [Node] 用户输入与数据无关: {clarification_msg}")
-        _push_to_stream_queue(f"\n\n⚠️ **需要澄清**\n\n{clarification_msg}\n\n")
+        _push_to_request_queue(request_id, f"\n\n⚠️ **需要澄清**\n\n{clarification_msg}\n\n")
         return {
             "phase": AnalysisPhase.USER_CLARIFICATION_NEEDED.value,
             "needs_clarification": True,
@@ -345,7 +365,7 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
             "您的分析需求不够明确，请提供更具体的分析要求。"
         )
         logger.info(f"ℹ️ [Node] 需要用户澄清: {clarification_msg}")
-        _push_to_stream_queue(f"\n\n❓ **需要澄清**\n\n{clarification_msg}\n\n")
+        _push_to_request_queue(request_id, f"\n\n❓ **需要澄清**\n\n{clarification_msg}\n\n")
         return {
             "phase": AnalysisPhase.USER_CLARIFICATION_NEEDED.value,
             "needs_clarification": True,
@@ -366,13 +386,13 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
     
     # 只输出分析策略和研究方向，不输出标题和重写后的需求
     if analysis_strategy:
-        _push_to_stream_queue(f"**分析策略：**\n{analysis_strategy}\n\n")
+        _push_to_request_queue(request_id, f"**分析策略：**\n{analysis_strategy}\n\n")
     
     if research_directions:
-        _push_to_stream_queue(f"**研究方向：**\n")
+        _push_to_request_queue(request_id, f"**研究方向：**\n")
         for i, direction in enumerate(research_directions, 1):
-            _push_to_stream_queue(f"{i}. {direction}\n")
-        _push_to_stream_queue("\n")
+            _push_to_request_queue(request_id, f"{i}. {direction}\n")
+        _push_to_request_queue(request_id, "\n")
     
     # 构建流式输出（用于状态记录）
     # 注意：所有内容（标题、流式token、格式化结果）都已经在节点执行时实时推送过了
@@ -399,6 +419,9 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     """
     logger.info("📝 [Node] 代码生成节点开始执行")
     
+    # 获取请求ID（用于多线程隔离）
+    request_id = state.get("request_id", "")
+    
     # 创建 LLM 客户端
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
@@ -423,7 +446,7 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
         stream_chunks.append(chunk)
     
     # 先输出标题（实时传递）
-    _push_to_stream_queue("\n📝 **正在生成分析代码...**\n\n")
+    _push_to_request_queue(request_id, "\n📝 **正在生成分析代码...**\n\n")
     
     # 流式调用 LLM，实时收集输出（每个 token 会通过队列实时传递）
     response = call_llm(
@@ -433,6 +456,7 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
         temperature=state["temperature"],
         stream=True,
         stream_callback=stream_callback,
+        request_id=request_id,
     )
     
     # 在控制台打印LLM的完整响应
@@ -463,7 +487,7 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
         }
     else:
         logger.warning("⚠️ [Node] 未能从 LLM 响应中提取代码")
-        _push_to_stream_queue(f"\n\n⚠️ 未生成代码，LLM 直接返回：\n\n{response}\n\n")
+        _push_to_request_queue(request_id, f"\n\n⚠️ 未生成代码，LLM 直接返回：\n\n{response}\n\n")
         
         # 注意：所有内容都已经在节点执行时实时推送过了
         # stream_output 保留为空，避免重复推送
@@ -484,6 +508,9 @@ def execute_code_node(state: AnalysisState) -> Dict[str, Any]:
     在本地安全环境中执行生成的 Python 代码
     """
     logger.info("▶️ [Node] 代码执行节点开始执行")
+    
+    # 获取请求ID（用于多线程隔离）
+    request_id = state.get("request_id", "")
     
     # 导入执行函数
     from ..utils import execute_code_safe
@@ -576,7 +603,7 @@ plt.rcParams['axes.unicode_minus'] = False
                 logger.warning(f"⚠️ 检查并复制CSV文件时出错: {e}")
         
         # 输出提示信息，不显示具体执行结果
-        _push_to_stream_queue("\n✅ **代码执行完毕，正在生成分析报告...**\n\n")
+        _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在生成分析报告...**\n\n")
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "current_output": output,
@@ -604,6 +631,9 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
     当代码执行失败时，调用 LLM 修复代码
     """
     logger.info("🔧 [Node] 代码修复节点开始执行")
+    
+    # 获取请求ID（用于多线程隔离）
+    request_id = state.get("request_id", "")
     
     retry_count = state.get("retry_count", 0) + 1
     max_retries = 3
@@ -635,7 +665,7 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         stream_chunks.append(chunk)
     
     # 先输出标题（实时传递）
-    _push_to_stream_queue(f"\n🔧 **正在修复代码（尝试 {retry_count}/{max_retries}）...**\n\n")
+    _push_to_request_queue(request_id, f"\n🔧 **正在修复代码（尝试 {retry_count}/{max_retries}）...**\n\n")
     
     # 流式调用 LLM 修复（每个 token 会通过队列实时传递）
     response = call_llm(
@@ -645,6 +675,7 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         temperature=state["temperature"],
         stream=True,
         stream_callback=stream_callback,
+        request_id=request_id,
     )
     
     # 在控制台打印LLM的完整响应
@@ -674,7 +705,7 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         }
     else:
         logger.warning("⚠️ [Node] 未能从修复响应中提取代码")
-        _push_to_stream_queue(f"\n\n⚠️ 无法修复代码，跳过执行，直接生成报告\n\n")
+        _push_to_request_queue(request_id, f"\n\n⚠️ 无法修复代码，跳过执行，直接生成报告\n\n")
         
         # 注意：所有内容都已经在节点执行时实时推送过了
         # stream_output 保留为空，避免重复推送
@@ -694,6 +725,9 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
     根据代码执行结果，调用 LLM 生成分析报告
     """
     logger.info("📄 [Node] 报告生成节点开始执行")
+    
+    # 获取请求ID（用于多线程隔离）
+    request_id = state.get("request_id", "")
     
     # 创建 LLM 客户端
     client = create_llm_client(state["api_url"], state.get("api_key"))
@@ -731,6 +765,7 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
         temperature=state["temperature"],
         stream=True,
         stream_callback=stream_callback,
+        request_id=request_id,
     )
     
     # 在控制台打印LLM的完整响应
@@ -984,17 +1019,25 @@ class DataAnalysisGraph:
         使用 LangGraph 的 stream 模式 + 线程队列实现真正的实时流式输出
         在节点执行过程中，LLM 的每个 token 都会实时传递
         
+        每个请求使用独立的队列，确保多线程安全。
+        
         Yields:
             str: 流式输出的字符串块
             
         Returns:
             AnalysisResult 分析结果
         """
-        # 初始化全局流式输出队列
-        _init_stream_queue()
+        import uuid
+        
+        # 为每个请求生成唯一的 request_id（用于队列隔离）
+        request_id = f"req-{uuid.uuid4().hex[:16]}"
+        logger.info(f"🚀 开始分析请求: {request_id}")
+        
+        # 为该请求创建独立的队列（多线程安全）
+        request_queue = _create_request_queue(request_id)
         
         try:
-            # 创建初始状态
+            # 创建初始状态（包含 request_id）
             initial_state = create_initial_state(
                 workspace_dir=workspace_dir,
                 thread_id=thread_id,
@@ -1008,6 +1051,7 @@ class DataAnalysisGraph:
                 model=model,
                 api_key=api_key,
                 temperature=temperature,
+                request_id=request_id,  # 传递请求ID
             )
             
             # 在后台线程中执行工作流
@@ -1022,7 +1066,7 @@ class DataAnalysisGraph:
                     for state_update in self._graph.stream(initial_state):
                         # state_update 是 {node_name: node_output} 的字典
                         for node_name, node_output in state_update.items():
-                            logger.debug(f"📊 节点 {node_name} 完成，输出状态更新")
+                            logger.debug(f"📊 节点 {node_name} 完成，输出状态更新 (request_id={request_id})")
                             
                             # 输出节点完成后的格式化内容
                             if "stream_output" in node_output:
@@ -1031,29 +1075,29 @@ class DataAnalysisGraph:
                                 if isinstance(stream_output_list, list):
                                     for chunk in stream_output_list:
                                         if chunk and chunk.strip():
-                                            _push_to_stream_queue(chunk)
+                                            _push_to_request_queue(request_id, chunk)
                                 elif stream_output_list:
-                                    _push_to_stream_queue(stream_output_list)
+                                    _push_to_request_queue(request_id, stream_output_list)
                             
                             # 更新最终状态
                             final_state = node_output
                 except Exception as e:
                     execution_error[0] = e
-                    logger.error(f"❌ 工作流执行出错: {e}", exc_info=True)
+                    logger.error(f"❌ 工作流执行出错 (request_id={request_id}): {e}", exc_info=True)
                 finally:
                     execution_done.set()
-                    # 发送结束标记
-                    _push_to_stream_queue(None)
+                    # 发送结束标记到该请求的队列
+                    _push_to_request_queue(request_id, None)
             
             # 启动后台线程执行工作流
             graph_thread = threading.Thread(target=run_graph, daemon=True)
             graph_thread.start()
             
-            # 实时从队列中读取并 yield token
+            # 实时从该请求的队列中读取并 yield token
             while True:
                 try:
-                    # 从队列中获取 token（超时0.1秒，避免阻塞太久）
-                    chunk = _stream_queue.get(timeout=0.1)
+                    # 从该请求的队列中获取 token（超时0.1秒，避免阻塞太久）
+                    chunk = request_queue.get(timeout=0.1)
                     
                     # None 表示结束
                     if chunk is None:
@@ -1068,7 +1112,7 @@ class DataAnalysisGraph:
                         # 清空队列中剩余的内容
                         while True:
                             try:
-                                chunk = _stream_queue.get_nowait()
+                                chunk = request_queue.get_nowait()
                                 if chunk is None:
                                     break
                                 yield chunk
@@ -1085,8 +1129,8 @@ class DataAnalysisGraph:
             
             # 如果线程仍在运行，说明超时了
             if graph_thread.is_alive():
-                logger.warning(f"⚠️ 分析超时（{timeout_seconds}秒），强制结束")
-                _push_to_stream_queue(f"\n\n⚠️ **分析超时**\n\n分析过程超过 {timeout_seconds} 秒，已自动终止。\n\n")
+                logger.warning(f"⚠️ 分析超时（{timeout_seconds}秒），强制结束 (request_id={request_id})")
+                yield f"\n\n⚠️ **分析超时**\n\n分析过程超过 {timeout_seconds} 秒，已自动终止。\n\n"
                 # 注意：daemon 线程会在主线程退出时自动终止
             
             # 检查是否有错误
@@ -1112,6 +1156,7 @@ class DataAnalysisGraph:
                     error_message="工作流执行失败",
                 )
         finally:
-            # 清理全局队列
-            _clear_stream_queue()
+            # 清理该请求的队列（不影响其他请求）
+            _remove_request_queue(request_id)
+            logger.info(f"🏁 分析请求完成: {request_id}")
 
