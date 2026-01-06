@@ -1127,7 +1127,9 @@ def analyze_excel_stream(
         yield f"❌ 文件保存失败: {str(e)}\n"
         return
     
-    # === 静默处理：表头分析 ===
+    # === 阶段0: LLM表头分析 ===
+    yield "🤖 **阶段0: LLM智能分析表格结构**\n\n"
+    
     api_key = llm_api_key if llm_api_key is not None else EXCEL_LLM_API_KEY
     actual_use_llm_validate = use_llm_validate and bool(api_key)
     
@@ -1145,6 +1147,24 @@ def analyze_excel_stream(
         if not process_result.success:
             yield f"❌ Excel处理失败: {process_result.error_message}\n"
             return
+        
+        # 输出LLM分析结果
+        if process_result.header_analysis:
+            ha = process_result.header_analysis
+            yield "✅ **LLM分析结果：**\n\n"
+            yield f"- **跳过行数**: {ha.skip_rows} 行（标题/注释等无效行）\n"
+            yield f"- **表头行数**: {ha.header_rows} 行\n"
+            yield f"- **表头类型**: {'多级表头' if ha.header_type == 'multi' else '单表头'}\n"
+            yield f"- **数据起始行**: 第 {ha.data_start_row} 行\n"
+            if ha.valid_cols:
+                yield f"- **有效列数**: {len(ha.valid_cols)} 列（已过滤无效列）\n"
+            else:
+                yield f"- **有效列数**: 全部列\n"
+            yield f"- **置信度**: {ha.confidence}\n"
+            if ha.reason:
+                yield f"- **分析说明**: {ha.reason}\n"
+            yield "\n"
+        
     except Exception as e:
         yield f"❌ 表头分析失败: {str(e)}\n"
         import traceback

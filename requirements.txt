@@ -18,7 +18,8 @@ scikit-learn
 statsmodels  # Statistical modeling library (used by LLM-generated code)
 seaborn
 matplotlib
-openpyxl  # Excel file processing
+openpyxl  # Excel file processing (.xlsx, .xlsm, .xlsb)
+xlrd  # Excel file processing (.xls, for conversion to .xlsx)
 
 # OpenAI SDK for LLM API calls
 openai
