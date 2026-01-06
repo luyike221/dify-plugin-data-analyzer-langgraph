@@ -154,6 +154,44 @@ credentials_schema:
       zh_Hans: "选择分析器类型。LangGraph 支持任意 OpenAI 兼容的 LLM（GPT-4、Claude 等）。Legacy 需要 DeepAnalyze 模型。"
       pt_BR: "Escolha o tipo de analisador. LangGraph funciona com qualquer LLM compatível com OpenAI (GPT-4, Claude, etc.). Legacy requer o modelo DeepAnalyze."
       ja_JP: "アナライザータイプを選択。LangGraphは任意のOpenAI互換LLM（GPT-4、Claudeなど）で動作。LegacyはDeepAnalyzeモデルが必要。"
+  - name: "preprocessing_timeout"
+    type: "text-input"
+    required: false
+    label:
+      en_US: "Preprocessing Timeout (seconds)"
+      zh_Hans: "预处理超时时间（秒）"
+      pt_BR: "Tempo Limite de Pré-processamento (segundos)"
+      ja_JP: "前処理タイムアウト（秒）"
+    placeholder:
+      en_US: "90"
+      zh_Hans: "90"
+      pt_BR: "90"
+      ja_JP: "90"
+    help:
+      en_US: "Timeout for preprocessing stage (Excel processing and LLM validation). Default: 90 seconds"
+      zh_Hans: "预处理阶段的超时时间（Excel处理和LLM验证）。默认：90秒"
+      pt_BR: "Tempo limite para estágio de pré-processamento (processamento Excel e validação LLM). Padrão: 90 segundos"
+      ja_JP: "前処理段階のタイムアウト（Excel処理とLLM検証）。デフォルト：90秒"
+    default: 90
+  - name: "analysis_timeout"
+    type: "text-input"
+    required: false
+    label:
+      en_US: "Analysis Timeout (seconds)"
+      zh_Hans: "分析超时时间（秒）"
+      pt_BR: "Tempo Limite de Análise (segundos)"
+      ja_JP: "分析タイムアウト（秒）"
+    placeholder:
+      en_US: "360"
+      zh_Hans: "360"
+      pt_BR: "360"
+      ja_JP: "360"
+    help:
+      en_US: "Timeout for analysis stage (AI data analysis with code generation and execution). Default: 360 seconds"
+      zh_Hans: "分析阶段的超时时间（AI数据分析和代码生成执行）。默认：360秒"
+      pt_BR: "Tempo limite para estágio de análise (análise de dados AI com geração e execução de código). Padrão: 360 segundos"
+      ja_JP: "分析段階のタイムアウト（AIデータ分析とコード生成実行）。デフォルト：360秒"
+    default: 360
 
 #########################################################################################
 # If you want to support OAuth, you can uncomment the following code.

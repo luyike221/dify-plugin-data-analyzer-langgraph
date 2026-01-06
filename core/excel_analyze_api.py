@@ -10,6 +10,7 @@ import json
 import os
 import time
 import uuid
+import random
 import shutil
 import logging
 from pathlib import Path
@@ -26,6 +27,7 @@ from .config import (
     EXCEL_LLM_API_KEY, EXCEL_LLM_BASE_URL, EXCEL_LLM_MODEL,
     DEFAULT_EXCEL_ANALYSIS_PROMPT,
     ANALYZER_TYPE,  # 分析器类型配置
+    CLEANUP_TIMEOUT_HOURS,  # 清理超时配置
 )
 # Import ProcessedFileInfo as it's still used in the code
 from .models import ProcessedFileInfo
@@ -114,7 +116,18 @@ def get_or_create_thread(thread_id: Optional[str]) -> tuple:
     """获取或创建会话
     
     如果提供了thread_id但会话不存在，会创建新会话并使用该thread_id
+    
+    同时会进行轻量级的过期会话清理（10%概率执行，避免频繁检查）
     """
+    # 轻量级清理：10%概率执行清理，避免频繁检查影响性能
+    if random.random() < 0.1:
+        try:
+            cleaned_count = storage.cleanup_expired_threads(CLEANUP_TIMEOUT_HOURS)
+            if cleaned_count > 0:
+                logger.info(f"🧹 清理了 {cleaned_count} 个过期会话及其工作空间")
+        except Exception as e:
+            logger.warning(f"⚠️ 清理过期会话时出错: {e}")
+    
     if thread_id:
         # 尝试使用已有会话
         thread = storage.get_thread(thread_id)
@@ -1029,6 +1042,8 @@ def analyze_excel_stream(
     llm_model: Optional[str] = None,
     analysis_api_key: Optional[str] = None,
     analyzer_type: Optional[str] = None,  # 新增：分析器类型参数
+    preprocessing_timeout: Optional[int] = None,  # 预处理超时时间（秒）
+    analysis_timeout: Optional[int] = None,  # 分析超时时间（秒）
 ) -> Generator[str, None, None]:
     """
     Excel智能分析函数 - 流式版本
@@ -1077,6 +1092,8 @@ def analyze_excel_stream(
             llm_base_url=llm_base_url,
             llm_model=llm_model,
             analysis_api_key=analysis_api_key,
+            preprocessing_timeout=preprocessing_timeout,
+            analysis_timeout=analysis_timeout,
         )
         return
     

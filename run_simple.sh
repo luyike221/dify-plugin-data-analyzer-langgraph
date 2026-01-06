@@ -8,3 +8,4 @@ echo "🚀 启动 Dify 插件..."
 # 使用 python3 运行
 python3 -m main
 
+

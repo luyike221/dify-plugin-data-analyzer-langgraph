@@ -137,7 +137,8 @@ class SmartHeaderProcessor:
     def validate_with_llm(self, rule_analysis: HeaderAnalysis, 
                          llm_api_key: Optional[str] = None,
                          llm_base_url: Optional[str] = None,
-                         llm_model: Optional[str] = None) -> HeaderAnalysis:
+                         llm_model: Optional[str] = None,
+                         timeout: Optional[int] = None) -> HeaderAnalysis:
         """
         使用LLM验证规则分析的结果
         
@@ -146,6 +147,7 @@ class SmartHeaderProcessor:
             llm_api_key: LLM API密钥（可选）
             llm_base_url: LLM API地址（可选）
             llm_model: LLM模型名称（可选）
+            timeout: 超时时间（秒），默认30秒
         
         返回:
             验证后的分析结果（如果LLM验证失败，返回原规则分析结果）
@@ -157,7 +159,7 @@ class SmartHeaderProcessor:
         prompt = self._build_validation_prompt(preview_data, merged_info, rule_analysis)
         
         # 调用LLM（使用传入的配置或从全局配置读取）
-        result = self._call_llm(prompt, llm_api_key, llm_base_url, llm_model)
+        result = self._call_llm(prompt, llm_api_key, llm_base_url, llm_model, timeout=timeout)
         
         # 解析LLM验证结果
         validated = self._parse_validation_response(result, rule_analysis)
@@ -216,7 +218,8 @@ class SmartHeaderProcessor:
         return prompt
     
     def _call_llm(self, prompt: str, llm_api_key: Optional[str] = None, 
-                  llm_base_url: Optional[str] = None, llm_model: Optional[str] = None) -> str:
+                  llm_base_url: Optional[str] = None, llm_model: Optional[str] = None,
+                  timeout: Optional[int] = None) -> str:
         """调用LLM API（支持OpenAI兼容接口）
         
         参数:
@@ -224,6 +227,7 @@ class SmartHeaderProcessor:
             llm_api_key: LLM API密钥（可选，如果不提供则从配置读取）
             llm_base_url: LLM API地址（可选，如果不提供则从配置读取）
             llm_model: LLM模型名称（可选，如果不提供则从配置读取）
+            timeout: 超时时间（秒），默认30秒
         """
         # 优先使用传入的参数，否则从配置读取
         api_key = llm_api_key if llm_api_key is not None else EXCEL_LLM_API_KEY
@@ -247,29 +251,133 @@ class SmartHeaderProcessor:
             "Authorization": f"Bearer {api_key}"
         }
         
-        payload = {
+        # 使用流式调用以支持 thinking 功能
+        base_payload = {
             "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.4,
             "max_tokens": 500,
-            "messages": [{"role": "user", "content": prompt}]
+            "stream": True,  # 流式调用
         }
         
-        logger.info(f"📡 发送 LLM API 请求到: {url}")
+        # 使用传入的超时时间，默认30秒
+        request_timeout = timeout if timeout is not None else 30
+        
+        logger.info(f"📡 发送 LLM API 请求到: {url} (流式调用)")
         logger.info(f"📝 提示词长度: {len(prompt)} 字符")
+        logger.info(f"⏱️ 超时设置: {request_timeout} 秒")
         
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            llm_response = result['choices'][0]['message']['content']
+            # 优先尝试启用 thinking 功能
+            payload_with_thinking = base_payload.copy()
+            payload_with_thinking["enable_thinking"] = True
+            
+            logger.debug(f"📦 请求 payload (启用 thinking): {json.dumps(payload_with_thinking, ensure_ascii=False, indent=2)}")
+            
+            response = requests.post(
+                url, 
+                headers=headers, 
+                json=payload_with_thinking, 
+                timeout=request_timeout,
+                stream=True  # 启用流式响应
+            )
+            
+            # 如果启用 thinking 失败，回退到不使用 thinking
+            if response.status_code != 200:
+                try:
+                    error_json = response.json()
+                    if "enable_thinking" in str(error_json).lower():
+                        logger.warning("⚠️ 启用 thinking 失败，尝试不使用 thinking")
+                        payload_no_thinking = base_payload.copy()
+                        logger.debug(f"📦 请求 payload (不使用 thinking): {json.dumps(payload_no_thinking, ensure_ascii=False, indent=2)}")
+                        response = requests.post(
+                            url, 
+                            headers=headers, 
+                            json=payload_no_thinking, 
+                            timeout=request_timeout,
+                            stream=True
+                        )
+                except:
+                    pass
+            
+            # 如果请求失败，输出详细的错误信息
+            if response.status_code != 200:
+                error_detail = ""
+                try:
+                    # 对于流式响应，尝试读取错误信息
+                    error_text = ""
+                    for line in response.iter_lines():
+                        if line:
+                            line_str = line.decode('utf-8')
+                            if line_str.startswith('data: '):
+                                line_str = line_str[6:]
+                            try:
+                                error_json = json.loads(line_str)
+                                error_detail = json.dumps(error_json, ensure_ascii=False, indent=2)
+                                break
+                            except:
+                                error_text += line_str + "\n"
+                    if not error_detail:
+                        error_detail = error_text or response.text
+                except:
+                    try:
+                        error_detail = response.text
+                    except:
+                        error_detail = f"无法读取错误详情 (状态码: {response.status_code})"
+                
+                logger.error(f"❌ LLM API 调用失败 (状态码: {response.status_code})")
+                logger.error(f"📋 错误详情:\n{error_detail}")
+                logger.error(f"🔗 请求 URL: {url}")
+                logger.error(f"📦 请求 payload: {json.dumps(base_payload, ensure_ascii=False, indent=2)}")
+                return None
+            
+            # 处理流式响应
+            full_content = ""
+            for line in response.iter_lines():
+                if line:
+                    line_str = line.decode('utf-8')
+                    # 跳过 SSE 格式的前缀 "data: "
+                    if line_str.startswith('data: '):
+                        line_str = line_str[6:]
+                    
+                    # 检查是否是结束标记
+                    if line_str.strip() == '[DONE]':
+                        break
+                    
+                    # 解析 JSON
+                    try:
+                        chunk_data = json.loads(line_str)
+                        if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
+                            delta = chunk_data['choices'][0].get('delta', {})
+                            content = delta.get('content', '')
+                            if content:
+                                full_content += content
+                    except json.JSONDecodeError:
+                        # 忽略无法解析的行（可能是空行或其他格式）
+                        continue
+            
+            if not full_content:
+                logger.warning("⚠️ LLM 流式响应为空")
+                return None
             
             logger.info("✅ LLM API 调用成功")
             logger.info("=" * 60)
             logger.info("📝 LLM 响应内容:")
             logger.info("=" * 60)
-            logger.info(llm_response)
+            logger.info(full_content)
             logger.info("=" * 60)
             
-            return llm_response
+            return full_content
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ LLM调用失败 (网络错误): {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_json = e.response.json()
+                    logger.error(f"📋 API 错误响应: {json.dumps(error_json, ensure_ascii=False, indent=2)}")
+                except:
+                    logger.error(f"📋 API 错误响应 (文本): {e.response.text}")
+            logger.debug("异常详情:", exc_info=True)
+            return None
         except Exception as e:
             logger.error(f"❌ LLM调用失败: {e}")
             logger.debug("异常详情:", exc_info=True)
@@ -469,6 +577,8 @@ class SmartHeaderProcessor:
         else:
             # 多表头：展平
             column_headers = []
+            original_metadata_list = []  # 保存原始元数据列表，按顺序对应
+            
             for col in cols_to_process:
                 parts = []
                 levels = {}
@@ -487,15 +597,21 @@ class SmartHeaderProcessor:
                 
                 col_name = '_'.join(unique_parts) if unique_parts else f'Column_{col}'
                 column_headers.append(col_name)
-                column_metadata[col_name] = levels
+                original_metadata_list.append(levels)  # 按顺序保存元数据
             
+            # 处理重复列名
             column_headers = self._handle_duplicate_names(column_headers)
             
-            # 重新映射元数据
+            # 重新映射元数据：使用索引对应关系
             new_metadata = {}
             for i, header in enumerate(column_headers):
-                original_name = '_'.join(unique_parts) if (unique_parts := list(column_metadata.values())[i].values()) else f'Column_{i+1}'
-                new_metadata[header] = list(column_metadata.values())[i]
+                # 使用索引直接获取对应的元数据
+                if i < len(original_metadata_list):
+                    new_metadata[header] = original_metadata_list[i]
+                else:
+                    # 如果索引超出范围，创建默认元数据
+                    logger.warning(f"⚠️ 索引超出范围: i={i}, headers长度={len(column_headers)}, metadata长度={len(original_metadata_list)}")
+                    new_metadata[header] = {"level1": header}
             
             return column_headers, new_metadata
     
@@ -514,7 +630,8 @@ class SmartHeaderProcessor:
     def to_dataframe(self, analysis: HeaderAnalysis = None, use_llm_validate: bool = False,
                     llm_api_key: Optional[str] = None,
                     llm_base_url: Optional[str] = None,
-                    llm_model: Optional[str] = None) -> Tuple[pd.DataFrame, HeaderAnalysis, Dict[str, Dict]]:
+                    llm_model: Optional[str] = None,
+                    preprocessing_timeout: Optional[int] = None) -> Tuple[pd.DataFrame, HeaderAnalysis, Dict[str, Dict]]:
         """
         转换为DataFrame
         
@@ -524,6 +641,7 @@ class SmartHeaderProcessor:
             llm_api_key: LLM API密钥（可选）
             llm_base_url: LLM API地址（可选）
             llm_model: LLM模型名称（可选）
+            preprocessing_timeout: 预处理超时时间（秒），默认90秒
         
         返回:
             (DataFrame, 分析结果, 列结构元数据)
@@ -536,7 +654,7 @@ class SmartHeaderProcessor:
             # 优先使用传入的配置，否则使用全局配置
             api_key = llm_api_key if llm_api_key is not None else EXCEL_LLM_API_KEY
             if use_llm_validate and api_key:
-                analysis = self.validate_with_llm(analysis, llm_api_key, llm_base_url, llm_model)
+                analysis = self.validate_with_llm(analysis, llm_api_key, llm_base_url, llm_model, timeout=preprocessing_timeout)
         
         # LLM验证完成后，进行列检测（使用最终的表头行数和数据起始行）
         if analysis.valid_cols is None:
@@ -567,7 +685,45 @@ class SmartHeaderProcessor:
                 data.append(row_data)
         
         df = pd.DataFrame(data, columns=headers)
+        
+        # 智能类型转换：尝试将数字字符串转换为数字
+        logger.info("🔄 开始智能类型转换...")
+        def smart_convert_value(value):
+            """智能转换值：尝试将数字字符串转换为数字"""
+            if value is None:
+                return value
+            if isinstance(value, (int, float)):
+                return value
+            if isinstance(value, str):
+                # 去除前后空格
+                value = value.strip()
+                if not value:  # 空字符串
+                    return None
+                # 尝试转换为数字
+                try:
+                    # 尝试整数（支持负数）
+                    if value.isdigit() or (value.startswith('-') and value[1:].isdigit()):
+                        return int(value)
+                    # 尝试浮点数（支持科学计数法）
+                    return float(value)
+                except (ValueError, AttributeError):
+                    # 转换失败，保持原字符串
+                    return value
+            return value
+        
+        # 对每列应用智能转换
+        for col in df.columns:
+            original_type = df[col].dtype
+            df[col] = df[col].apply(smart_convert_value)
+            new_type = df[col].dtype
+            if original_type != new_type:
+                logger.debug(f"  列 '{col}': {original_type} → {new_type}")
+        
+        # 使用 pandas 的 convert_dtypes 进一步优化类型推断
+        df = df.convert_dtypes()
+        
         logger.info(f"✅ DataFrame 创建完成: {len(df)} 行 x {len(df.columns)} 列")
+        logger.info(f"📊 数据类型优化完成")
         return df, analysis, column_metadata
     
     def close(self):
@@ -586,7 +742,8 @@ def process_excel_file(
     output_filename: str = None,
     llm_api_key: Optional[str] = None,
     llm_base_url: Optional[str] = None,
-    llm_model: Optional[str] = None
+    llm_model: Optional[str] = None,
+    preprocessing_timeout: Optional[int] = None
 ) -> ExcelProcessResult:
     """
     处理Excel文件的主函数
@@ -600,6 +757,7 @@ def process_excel_file(
         llm_api_key: LLM API密钥（可选）
         llm_base_url: LLM API地址（可选）
         llm_model: LLM模型名称（可选）
+        preprocessing_timeout: 预处理超时时间（秒），默认90秒
     
     返回:
         ExcelProcessResult
@@ -614,7 +772,8 @@ def process_excel_file(
             use_llm_validate=use_llm_validate,
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
-            llm_model=llm_model
+            llm_model=llm_model,
+            preprocessing_timeout=preprocessing_timeout
         )
         processor.close()
         
@@ -651,12 +810,12 @@ def process_excel_file(
         with open(metadata_path, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
         
-        # 打印处理后的JSON元数据
-        logger.info("=" * 80)
-        logger.info("📄 处理后的JSON元数据:")
-        logger.info("=" * 80)
-        logger.info(json.dumps(metadata, ensure_ascii=False, indent=2))
-        logger.info("=" * 80)
+        # 打印处理后的JSON元数据（暂时注释）
+        # logger.info("=" * 80)
+        # logger.info("📄 处理后的JSON元数据:")
+        # logger.info("=" * 80)
+        # logger.info(json.dumps(metadata, ensure_ascii=False, indent=2))
+        # logger.info("=" * 80)
         
         return ExcelProcessResult(
             success=True,

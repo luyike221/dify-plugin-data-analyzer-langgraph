@@ -249,11 +249,13 @@ class DifyPluginDataAnalyzerTool(Tool):
         - query: 可选的分析查询语句或提示词
         - use_llm_header_validation: 是否使用LLM验证表头（默认true）
         - thread_id: 可选的会话ID，用于复用已有会话
+        - sheet_name: 可选的工作表名称，如果不提供则处理第一个工作表
         """
         input_file = tool_parameters.get("input_file")
         query = tool_parameters.get("query", "")
         use_llm_header_validation = tool_parameters.get("use_llm_header_validation", True)
         thread_id = tool_parameters.get("thread_id")  # 从工具参数获取会话ID（由Dify生成并传入）
+        sheet_name = tool_parameters.get("sheet_name")  # 从工具参数获取工作表名称
         
         # 从 provider credentials 获取配置
         llm_api_key = None
@@ -286,6 +288,17 @@ class DifyPluginDataAnalyzerTool(Tool):
             analysis_model = credentials.get("analysis_model") or os.environ.get("ANALYSIS_MODEL")
             analysis_api_key = credentials.get("analysis_api_key") or os.environ.get("ANALYSIS_API_KEY")
             analyzer_type = credentials.get("analyzer_type") or os.environ.get("ANALYZER_TYPE", "langgraph")
+            # 获取超时配置
+            preprocessing_timeout = credentials.get("preprocessing_timeout")
+            if preprocessing_timeout is not None:
+                preprocessing_timeout = int(preprocessing_timeout)
+            else:
+                preprocessing_timeout = int(os.environ.get("PREPROCESSING_TIMEOUT", "90"))
+            analysis_timeout = credentials.get("analysis_timeout")
+            if analysis_timeout is not None:
+                analysis_timeout = int(analysis_timeout)
+            else:
+                analysis_timeout = int(os.environ.get("ANALYSIS_TIMEOUT", "360"))
         else:
             llm_api_key = os.environ.get("EXCEL_LLM_API_KEY")
             llm_base_url = os.environ.get("EXCEL_LLM_BASE_URL", "https://api.openai.com/v1/chat/completions")
@@ -294,6 +307,9 @@ class DifyPluginDataAnalyzerTool(Tool):
             analysis_model = os.environ.get("ANALYSIS_MODEL")
             analysis_api_key = os.environ.get("ANALYSIS_API_KEY")
             analyzer_type = os.environ.get("ANALYZER_TYPE", "langgraph")
+            # 获取超时配置（从环境变量，默认值）
+            preprocessing_timeout = int(os.environ.get("PREPROCESSING_TIMEOUT", "90"))
+            analysis_timeout = int(os.environ.get("ANALYSIS_TIMEOUT", "360"))
         
         # 验证必选配置
         if not analysis_api_url:
@@ -428,7 +444,7 @@ class DifyPluginDataAnalyzerTool(Tool):
                 analysis_model=analysis_model,
                 thread_id=thread_id,  # 传递会话ID（来自Dify的conversation_id或插件内部创建）
                 use_llm_validate=use_llm_validate,
-                sheet_name=None,
+                sheet_name=sheet_name,  # 传递工作表名称，如果为None则处理第一个工作表
                 auto_analysis=True,
                 analysis_prompt=analysis_prompt,
                 temperature=0.4,
@@ -437,6 +453,8 @@ class DifyPluginDataAnalyzerTool(Tool):
                 llm_model=llm_model,
                 analysis_api_key=analysis_api_key,
                 analyzer_type=analyzer_type,  # 分析器类型：langgraph 或 legacy
+                preprocessing_timeout=preprocessing_timeout,  # 预处理超时时间
+                analysis_timeout=analysis_timeout,  # 分析超时时间
             ):
                 # 流式输出每个块
                 yield self.create_stream_variable_message('stream_output', chunk)

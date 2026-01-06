@@ -112,6 +112,7 @@ def run_langgraph_analysis_stream(
     model: str,
     api_key: Optional[str] = None,
     temperature: float = 0.4,
+    analysis_timeout: Optional[int] = None,
 ) -> Generator[str, None, None]:
     """
     使用 LangGraph 执行数据分析（流式）
@@ -128,6 +129,7 @@ def run_langgraph_analysis_stream(
         model: 模型名称
         api_key: LLM API 密钥
         temperature: 生成温度
+        analysis_timeout: 分析超时时间（秒），默认360秒
         
     Yields:
         流式输出的字符串块
@@ -138,8 +140,7 @@ def run_langgraph_analysis_stream(
     # 创建分析图
     graph = DataAnalysisGraph()
     
-    # 流式执行分析
-    yield "🚀 **开始 LangGraph 数据分析工作流**\n\n"
+
     
     try:
         for chunk in graph.analyze_stream(
@@ -155,6 +156,7 @@ def run_langgraph_analysis_stream(
             model=model,
             api_key=api_key,
             temperature=temperature,
+            analysis_timeout=analysis_timeout,
         ):
             yield chunk
         
@@ -180,6 +182,8 @@ def analyze_excel_with_langgraph(
     llm_base_url: Optional[str] = None,
     llm_model: Optional[str] = None,
     analysis_api_key: Optional[str] = None,
+    preprocessing_timeout: Optional[int] = None,
+    analysis_timeout: Optional[int] = None,
 ) -> Generator[str, None, None]:
     """
     使用 LangGraph 分析 Excel 文件（流式版本）
@@ -266,6 +270,7 @@ def analyze_excel_with_langgraph(
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model=llm_model,
+            preprocessing_timeout=preprocessing_timeout,
         )
         
         if not process_result.success:
@@ -291,6 +296,7 @@ def analyze_excel_with_langgraph(
             model=analysis_model,
             api_key=analysis_api_key,
             temperature=temperature,
+            analysis_timeout=analysis_timeout,
         ):
             yield chunk
         

@@ -14,12 +14,14 @@ import operator
 class AnalysisPhase(str, Enum):
     """分析阶段枚举"""
     INIT = "init"
+    INTENT_ANALYSIS = "intent_analysis"  # 意图识别和策略制定
     CODE_GENERATION = "code_generation"
     CODE_EXECUTION = "code_execution"
     ERROR_FIXING = "error_fixing"
     REPORT_GENERATION = "report_generation"
     COMPLETED = "completed"
     FAILED = "failed"
+    USER_CLARIFICATION_NEEDED = "user_clarification_needed"  # 需要用户澄清
 
 
 @dataclass
@@ -112,6 +114,14 @@ class AnalysisState(TypedDict, total=False):
     execution_success: bool
     error_message: Optional[str]
     
+    # === 意图分析结果 ===
+    refined_prompt: str  # 重写后的用户输入
+    analysis_strategy: str  # 分析策略
+    research_directions: List[str]  # 研究方向列表
+    intent_analysis_result: str  # 意图分析结果（JSON格式）
+    needs_clarification: bool  # 是否需要用户澄清
+    clarification_message: Optional[str]  # 澄清消息
+    
     # === 历史记录 ===
     code_history: Annotated[List[str], operator.add]
     execution_history: Annotated[List[CodeExecution], operator.add]
@@ -184,6 +194,14 @@ def create_initial_state(
         current_output="",
         execution_success=False,
         error_message=None,
+        
+        # 意图分析结果（初始为空）
+        refined_prompt="",
+        analysis_strategy="",
+        research_directions=[],
+        intent_analysis_result="",
+        needs_clarification=False,
+        clarification_message=None,
         
         # 历史记录
         code_history=[],
