@@ -220,6 +220,44 @@ credentials_schema:
       pt_BR: "Se habilitado, a resposta LLM para análise de cabeçalho será impressa no fluxo para fins de depuração. Padrão: desabilitado"
       ja_JP: "有効にすると、デバッグ目的でヘッダー分析のLLM応答がストリームに出力されます。デフォルト：無効"
     default: false
+  - name: "max_file_size_mb"
+    type: "text-input"
+    required: false
+    label:
+      en_US: "Maximum File Size (MB)"
+      zh_Hans: "最大文件大小（MB）"
+      pt_BR: "Tamanho Máximo do Arquivo (MB)"
+      ja_JP: "最大ファイルサイズ（MB）"
+    placeholder:
+      en_US: "5"
+      zh_Hans: "5"
+      pt_BR: "5"
+      ja_JP: "5"
+    help:
+      en_US: "Maximum allowed Excel file size in MB. Files larger than this will be rejected. Default: 5 MB"
+      zh_Hans: "允许的最大Excel文件大小（MB）。超过此大小的文件将被拒绝。默认：5 MB"
+      pt_BR: "Tamanho máximo permitido do arquivo Excel em MB. Arquivos maiores que isso serão rejeitados. Padrão: 5 MB"
+      ja_JP: "許可される最大Excelファイルサイズ（MB）。このサイズを超えるファイルは拒否されます。デフォルト：5 MB"
+    default: 5
+  - name: "excel_processing_timeout"
+    type: "text-input"
+    required: false
+    label:
+      en_US: "Excel Processing Timeout (seconds)"
+      zh_Hans: "Excel处理超时时间（秒）"
+      pt_BR: "Tempo Limite de Processamento Excel (segundos)"
+      ja_JP: "Excel処理タイムアウト（秒）"
+    placeholder:
+      en_US: "10"
+      zh_Hans: "10"
+      pt_BR: "10"
+      ja_JP: "10"
+    help:
+      en_US: "Timeout for Excel file processing (file reading and parsing, before LLM analysis). If exceeded, will show 'Excel content too large or format too complex, parsing failed'. Default: 10 seconds"
+      zh_Hans: "Excel文件处理超时时间（文件读取和解析，在LLM分析之前）。如果超时，将显示'Excel内容过多或格式太复杂，解析失败'。默认：10秒"
+      pt_BR: "Tempo limite para processamento de arquivo Excel (leitura e análise do arquivo, antes da análise LLM). Se excedido, mostrará 'Conteúdo Excel muito grande ou formato muito complexo, análise falhou'. Padrão: 10 segundos"
+      ja_JP: "Excelファイル処理のタイムアウト（ファイル読み込みと解析、LLM分析の前）。超過した場合、「Excelコンテンツが多すぎるか、形式が複雑すぎて、解析に失敗しました」と表示されます。デフォルト：10秒"
+    default: 10
 
 #########################################################################################
 # If you want to support OAuth, you can uncomment the following code.

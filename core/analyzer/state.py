@@ -18,6 +18,7 @@ class AnalysisPhase(str, Enum):
     CODE_GENERATION = "code_generation"
     CODE_EXECUTION = "code_execution"
     ERROR_FIXING = "error_fixing"
+    EVALUATE_COMPLETENESS = "evaluate_completeness"  # 评估分析完整性（新增）
     REPORT_GENERATION = "report_generation"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -89,6 +90,13 @@ class AnalysisState(TypedDict, total=False):
         retry_count: 重试次数
         round_count: 分析轮次
         
+        # === 多轮分析相关 ===
+        max_analysis_rounds: 最大分析轮数（防止无限循环）
+        completed_directions: 已完成的分析方向列表
+        next_analysis_direction: 下一轮分析方向
+        need_more_analysis: 是否需要更多分析
+        all_execution_outputs: 所有轮次的执行结果
+        
         # === 输出 ===
         report: 最终报告
         generated_files: 生成的文件列表
@@ -124,11 +132,17 @@ class AnalysisState(TypedDict, total=False):
     
     # === 意图分析结果 ===
     refined_prompt: str  # 重写后的用户输入
-    analysis_strategy: str  # 分析策略
-    research_directions: List[str]  # 研究方向列表
+    analysis_type: str  # 分析类型：simple/overview/specific
+    analysis_tasks: List[str]  # 分析任务列表
+    current_task: str  # 当前轮次要完成的任务
+    completed_tasks: Annotated[List[str], operator.add]  # 已完成的任务列表
     intent_analysis_result: str  # 意图分析结果（JSON格式）
     needs_clarification: bool  # 是否需要用户澄清
     clarification_message: Optional[str]  # 澄清消息
+    
+    # 兼容旧字段（保留但不推荐使用）
+    analysis_strategy: str  # 分析策略（旧）
+    research_directions: List[str]  # 研究方向列表（旧）
     
     # === 历史记录 ===
     code_history: Annotated[List[str], operator.add]
@@ -138,6 +152,13 @@ class AnalysisState(TypedDict, total=False):
     # === 计数器 ===
     retry_count: int
     round_count: int
+    
+    # === 多轮分析相关 ===
+    max_analysis_rounds: int  # 最大分析轮数（防止无限循环），默认3
+    completed_directions: Annotated[List[str], operator.add]  # 已完成的分析方向
+    next_analysis_direction: str  # 下一轮分析方向
+    need_more_analysis: bool  # 是否需要更多分析
+    all_execution_outputs: Annotated[List[str], operator.add]  # 所有轮次的执行结果
     
     # === 输出 ===
     report: str
@@ -160,6 +181,7 @@ def create_initial_state(
     temperature: float = 0.4,
     request_id: Optional[str] = None,  # 新增：请求唯一标识
     debug_print_execution_output: bool = False,  # 是否在流式输出中打印代码执行结果
+    max_analysis_rounds: int = 3,  # 最大分析轮数，防止无限循环
 ) -> AnalysisState:
     """
     创建初始分析状态
@@ -178,6 +200,8 @@ def create_initial_state(
         api_key: LLM API 密钥
         temperature: 生成温度
         request_id: 请求唯一标识（用于多线程隔离）
+        debug_print_execution_output: 是否在流式输出中打印代码执行结果
+        max_analysis_rounds: 最大分析轮数（默认3轮，防止无限循环）
         
     Returns:
         初始化的 AnalysisState
@@ -218,11 +242,17 @@ def create_initial_state(
         
         # 意图分析结果（初始为空）
         refined_prompt="",
-        analysis_strategy="",
-        research_directions=[],
+        analysis_type="",  # simple/overview/specific
+        analysis_tasks=[],
+        current_task="",
+        completed_tasks=[],
         intent_analysis_result="",
         needs_clarification=False,
         clarification_message=None,
+        
+        # 兼容旧字段
+        analysis_strategy="",
+        research_directions=[],
         
         # 历史记录
         code_history=[],
@@ -232,6 +262,13 @@ def create_initial_state(
         # 计数器
         retry_count=0,
         round_count=0,
+        
+        # 多轮分析相关
+        max_analysis_rounds=max_analysis_rounds,
+        completed_directions=[],
+        next_analysis_direction="",
+        need_more_analysis=False,
+        all_execution_outputs=[],
         
         # 输出
         report="",

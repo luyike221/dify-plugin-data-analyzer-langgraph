@@ -95,8 +95,14 @@ def extract_api_base(api_url: str) -> str:
         return api_url
 
 
-def validate_excel_file(filename: str, file_size: int) -> None:
-    """验证Excel文件"""
+def validate_excel_file(filename: str, file_size: int, max_file_size_mb: Optional[int] = None) -> None:
+    """验证Excel文件
+    
+    参数:
+        filename: 文件名
+        file_size: 文件大小（字节）
+        max_file_size_mb: 最大文件大小（MB），如果为None则使用默认值
+    """
     # 检查扩展名
     ext = Path(filename).suffix.lower()
     if ext not in EXCEL_VALID_EXTENSIONS:
@@ -105,10 +111,12 @@ def validate_excel_file(filename: str, file_size: int) -> None:
         )
     
     # 检查文件大小
-    max_size_bytes = EXCEL_MAX_FILE_SIZE_MB * 1024 * 1024
+    # 优先使用传入的配置，否则使用默认配置
+    max_size_mb = max_file_size_mb if max_file_size_mb is not None else EXCEL_MAX_FILE_SIZE_MB
+    max_size_bytes = max_size_mb * 1024 * 1024
     if file_size > max_size_bytes:
         raise ValueError(
-            f"文件过大: {file_size / 1024 / 1024:.2f}MB，最大支持: {EXCEL_MAX_FILE_SIZE_MB}MB"
+            f"文件过大: {file_size / 1024 / 1024:.2f}MB，最大支持: {max_size_mb}MB"
         )
 
 
@@ -1046,6 +1054,8 @@ def analyze_excel_stream(
     analysis_timeout: Optional[int] = None,  # 分析超时时间（秒）
     debug_print_execution_output: bool = False,  # 是否在流式输出中打印代码执行结果（用于调试）
     debug_print_header_analysis: bool = False,  # 是否在流式输出中打印表头分析LLM响应（用于调试）
+    max_file_size_mb: Optional[int] = None,  # 最大文件大小（MB），如果为None则使用默认值
+    excel_processing_timeout: Optional[int] = None,  # Excel处理超时时间（秒），在LLM分析之前
 ) -> Generator[str, None, None]:
     """
     Excel智能分析函数 - 流式版本
@@ -1098,6 +1108,8 @@ def analyze_excel_stream(
             analysis_timeout=analysis_timeout,
             debug_print_execution_output=debug_print_execution_output,
             debug_print_header_analysis=debug_print_header_analysis,
+            max_file_size_mb=max_file_size_mb,
+            excel_processing_timeout=excel_processing_timeout,
         )
         return
     
@@ -1108,7 +1120,7 @@ def analyze_excel_stream(
     
     # === 静默处理：文件验证 ===
     try:
-        validate_excel_file(filename, file_size)
+        validate_excel_file(filename, file_size, max_file_size_mb=max_file_size_mb)
     except ValueError as e:
         yield f"❌ 文件验证失败: {str(e)}\n"
         return
@@ -1145,7 +1157,8 @@ def analyze_excel_stream(
             use_llm_validate=actual_use_llm_validate,
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
-            llm_model=llm_model
+            llm_model=llm_model,
+            excel_processing_timeout=excel_processing_timeout
         )
         
         if not process_result.success:

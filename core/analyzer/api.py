@@ -114,9 +114,13 @@ def run_langgraph_analysis_stream(
     temperature: float = 0.4,
     analysis_timeout: Optional[int] = None,
     debug_print_execution_output: bool = False,
+    max_analysis_rounds: int = 3,  # 新增：最大分析轮数
 ) -> Generator[str, None, None]:
     """
     使用 LangGraph 执行数据分析（流式）
+    
+    支持多轮分析：系统会自动评估分析完整性，如果需要更多分析，
+    会继续生成代码并执行，直到分析完成或达到最大轮数。
     
     Args:
         workspace_dir: 工作空间目录
@@ -131,6 +135,8 @@ def run_langgraph_analysis_stream(
         api_key: LLM API 密钥
         temperature: 生成温度
         analysis_timeout: 分析超时时间（秒），默认360秒
+        debug_print_execution_output: 是否打印代码执行输出（用于调试）
+        max_analysis_rounds: 最大分析轮数（默认3轮），防止无限循环
         
     Yields:
         流式输出的字符串块
@@ -140,8 +146,6 @@ def run_langgraph_analysis_stream(
     
     # 创建分析图
     graph = DataAnalysisGraph()
-    
-
     
     try:
         for chunk in graph.analyze_stream(
@@ -159,6 +163,7 @@ def run_langgraph_analysis_stream(
             temperature=temperature,
             analysis_timeout=analysis_timeout,
             debug_print_execution_output=debug_print_execution_output,
+            max_analysis_rounds=max_analysis_rounds,  # 传递最大分析轮数
         ):
             yield chunk
         
@@ -188,12 +193,18 @@ def analyze_excel_with_langgraph(
     analysis_timeout: Optional[int] = None,
     debug_print_execution_output: bool = False,
     debug_print_header_analysis: bool = False,
+    max_analysis_rounds: int = 3,  # 新增：最大分析轮数
+    max_file_size_mb: Optional[int] = None,  # 最大文件大小（MB），如果为None则使用默认值
+    excel_processing_timeout: Optional[int] = None,  # Excel处理超时时间（秒），在LLM分析之前
 ) -> Generator[str, None, None]:
     """
     使用 LangGraph 分析 Excel 文件（流式版本）
     
     这是与 analyze_excel_stream 兼容的接口，
     可以直接替换现有的分析函数
+    
+    支持多轮分析：系统会自动评估分析完整性，如果需要更多分析，
+    会继续生成代码并执行，直到分析完成或达到最大轮数。
     
     Args:
         file_content: Excel 文件内容
@@ -209,6 +220,11 @@ def analyze_excel_with_langgraph(
         llm_base_url: LLM API 地址
         llm_model: LLM 模型名称
         analysis_api_key: 分析 API 密钥
+        preprocessing_timeout: 预处理超时时间（秒）
+        analysis_timeout: 分析超时时间（秒）
+        debug_print_execution_output: 是否打印代码执行输出（用于调试）
+        debug_print_header_analysis: 是否打印表头分析结果（用于调试）
+        max_analysis_rounds: 最大分析轮数（默认3轮），防止无限循环
         
     Yields:
         流式输出的字符串块
@@ -227,15 +243,12 @@ def analyze_excel_with_langgraph(
     # 文件验证
     from pathlib import Path
     from ..config import EXCEL_VALID_EXTENSIONS, EXCEL_MAX_FILE_SIZE_MB
+    from ..excel_analyze_api import validate_excel_file
     
-    ext = Path(filename).suffix.lower()
-    if ext not in EXCEL_VALID_EXTENSIONS:
-        yield f"❌ 不支持的文件格式: {ext}\n"
-        return
-    
-    max_size_bytes = EXCEL_MAX_FILE_SIZE_MB * 1024 * 1024
-    if file_size > max_size_bytes:
-        yield f"❌ 文件过大: {file_size / 1024 / 1024:.2f}MB\n"
+    try:
+        validate_excel_file(filename, file_size, max_file_size_mb=max_file_size_mb)
+    except ValueError as e:
+        yield f"❌ 文件验证失败: {str(e)}\n"
         return
     
     # 创建或获取会话
@@ -275,6 +288,7 @@ def analyze_excel_with_langgraph(
             llm_base_url=llm_base_url,
             llm_model=llm_model,
             preprocessing_timeout=preprocessing_timeout,
+            excel_processing_timeout=excel_processing_timeout
         )
         
         if not process_result.success:
@@ -309,6 +323,7 @@ def analyze_excel_with_langgraph(
             temperature=temperature,
             analysis_timeout=analysis_timeout,
             debug_print_execution_output=debug_print_execution_output,
+            max_analysis_rounds=max_analysis_rounds,  # 传递最大分析轮数
         ):
             yield chunk
         

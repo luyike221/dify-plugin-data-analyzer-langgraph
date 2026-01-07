@@ -262,19 +262,13 @@ def is_execution_error(output: str) -> bool:
 
 def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
     """
-    意图分析和策略制定节点
+    意图分析节点
     
-    功能：
-    1. 判断用户输入与数据的相关性
-    2. 如果无关，返回澄清消息
-    3. 如果相关，重写用户需求并制定分析策略
+    职责：理解用户需求，制定分析计划
     """
     logger.info("🔍 [Node] 意图分析节点开始执行")
     
-    # 获取请求ID（用于多线程隔离）
     request_id = state.get("request_id", "")
-    
-    # 创建 LLM 客户端
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
     # 构建意图分析 prompt
@@ -287,131 +281,89 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
         user_prompt=state["user_prompt"],
     )
     
-    # 收集流式输出的列表（用于后续格式化）
-    stream_chunks = []
-    
-    def stream_callback(chunk: str):
-        """流式输出回调，只收集 token，不推送到队列（避免输出JSON）"""
-        stream_chunks.append(chunk)
-        # 注意：不推送到队列，避免直接输出JSON内容
-    
-    # 流式调用 LLM，收集输出但不实时推送（避免输出JSON）
-    # 使用流式调用以支持 think 功能，但不直接输出内容
+    # 流式调用 LLM（不输出 JSON 到用户）
     response = call_llm(
         client=client,
         messages=messages,
         model=state["model"],
         temperature=state["temperature"],
         stream=True,
-        stream_callback=stream_callback,
-        push_to_queue=False,  # 不推送到队列，避免输出JSON
+        push_to_queue=False,
         request_id=request_id,
     )
     
-    # 在控制台打印LLM的完整响应
     logger.info("=" * 80)
     logger.info("🔍 [意图分析] LLM 完整响应:")
-    logger.info("=" * 80)
     logger.info(response)
     logger.info("=" * 80)
     
     # 解析 JSON 响应
     import json
     try:
-        # 尝试提取 JSON（可能包含 markdown 代码块）
         json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            # 尝试直接解析整个响应
-            json_str = response
-        
+        json_str = json_match.group(1) if json_match else response
         intent_result = json.loads(json_str.strip())
     except (json.JSONDecodeError, AttributeError) as e:
         logger.warning(f"⚠️ [Node] 无法解析意图分析结果: {e}")
-        # 如果解析失败，默认继续分析
         intent_result = {
             "is_relevant": True,
             "needs_clarification": False,
+            "analysis_type": "overview",
             "refined_prompt": state["user_prompt"],
-            "analysis_strategy": "基于用户需求进行数据分析",
-            "research_directions": ["数据概览", "统计分析"],
+            "analysis_tasks": ["数据概览分析"],
+            "first_task": state["user_prompt"],
         }
     
-    # 判断是否需要用户澄清
+    # 判断是否需要澄清
     is_relevant = intent_result.get("is_relevant", True)
     needs_clarification = intent_result.get("needs_clarification", False)
     
-    if not is_relevant:
-        # 数据与用户输入无关
+    if not is_relevant or needs_clarification:
         clarification_msg = intent_result.get(
             "clarification_message",
-            "您的问题与当前数据文件不相关。请提供与数据相关的分析需求，或上传正确的数据文件。"
+            "您的分析需求不够明确，请提供更具体的要求。"
         )
-        logger.warning(f"⚠️ [Node] 用户输入与数据无关: {clarification_msg}")
-        _push_to_request_queue(request_id, f"\n\n⚠️ **需要澄清**\n\n{clarification_msg}\n\n")
-        # 注意：澄清消息已经在节点执行时通过队列实时推送过了
-        # stream_output 保留为空，避免重复推送
-        return {
-            "phase": AnalysisPhase.USER_CLARIFICATION_NEEDED.value,
-            "needs_clarification": True,
-            "clarification_message": clarification_msg,
-            "intent_analysis_result": response,
-            "stream_output": [],  # 避免重复推送
-        }
-    
-    if needs_clarification:
-        # 需要用户澄清
-        clarification_msg = intent_result.get(
-            "clarification_message",
-            "您的分析需求不够明确，请提供更具体的分析要求。"
-        )
-        logger.info(f"ℹ️ [Node] 需要用户澄清: {clarification_msg}")
         _push_to_request_queue(request_id, f"\n\n❓ **需要澄清**\n\n{clarification_msg}\n\n")
-        # 注意：澄清消息已经在节点执行时通过队列实时推送过了
-        # stream_output 保留为空，避免重复推送
         return {
             "phase": AnalysisPhase.USER_CLARIFICATION_NEEDED.value,
             "needs_clarification": True,
             "clarification_message": clarification_msg,
             "intent_analysis_result": response,
-            "stream_output": [],  # 避免重复推送
+            "stream_output": [],
         }
     
-    # 可以继续分析
+    # 提取分析计划
+    analysis_type = intent_result.get("analysis_type", "overview")
     refined_prompt = intent_result.get("refined_prompt", state["user_prompt"])
-    analysis_strategy = intent_result.get("analysis_strategy", "")
-    research_directions = intent_result.get("research_directions", [])
+    analysis_tasks = intent_result.get("analysis_tasks", [refined_prompt])
+    first_task = intent_result.get("first_task", analysis_tasks[0] if analysis_tasks else refined_prompt)
     
     logger.info(f"✅ [Node] 意图分析完成")
-    logger.info(f"   - 重写后的需求: {refined_prompt[:100]}...")
-    logger.info(f"   - 分析策略: {analysis_strategy[:100]}...")
-    logger.info(f"   - 研究方向: {research_directions}")
+    logger.info(f"   - 分析类型: {analysis_type}")
+    logger.info(f"   - 分析任务: {analysis_tasks}")
+    logger.info(f"   - 首个任务: {first_task}")
     
-    # 只输出分析策略和研究方向，不输出标题和重写后的需求
-    if analysis_strategy:
-        _push_to_request_queue(request_id, f"**分析策略：**\n{analysis_strategy}\n\n")
-    
-    if research_directions:
-        _push_to_request_queue(request_id, f"**研究方向：**\n")
-        for i, direction in enumerate(research_directions, 1):
-            _push_to_request_queue(request_id, f"{i}. {direction}\n")
+    # 输出分析计划
+    _push_to_request_queue(request_id, f"**分析类型：** {analysis_type}\n\n")
+    if analysis_tasks:
+        _push_to_request_queue(request_id, "**分析计划：**\n")
+        for i, task in enumerate(analysis_tasks, 1):
+            _push_to_request_queue(request_id, f"{i}. {task}\n")
         _push_to_request_queue(request_id, "\n")
-    
-    # 构建流式输出（用于状态记录）
-    # 注意：所有内容（标题、流式token、格式化结果）都已经在节点执行时实时推送过了
-    # stream_output 保留为空，避免重复推送
-    stream_output = []
     
     return {
         "phase": AnalysisPhase.CODE_GENERATION.value,
         "refined_prompt": refined_prompt,
-        "analysis_strategy": analysis_strategy,
-        "research_directions": research_directions,
+        "analysis_type": analysis_type,
+        "analysis_tasks": analysis_tasks,
+        "current_task": first_task,
         "intent_analysis_result": response,
         "needs_clarification": False,
         "messages": messages + [{"role": "assistant", "content": response}],
-        "stream_output": stream_output,  # 流式输出列表，每个元素都会实时传递
+        "stream_output": [],
+        # 兼容旧字段
+        "analysis_strategy": "",
+        "research_directions": analysis_tasks,
     }
 
 
@@ -419,54 +371,64 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     """
     代码生成节点
     
-    根据用户需求和数据信息，调用 LLM 生成 Python 分析代码
+    职责：根据当前分析任务生成 Python 代码
+    支持多轮分析，后续轮会传入之前的分析结果
     """
     logger.info("📝 [Node] 代码生成节点开始执行")
     
-    # 获取请求ID（用于多线程隔离）
     request_id = state.get("request_id", "")
-    
-    # 创建 LLM 客户端
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
-    # 使用重写后的用户需求（如果存在），否则使用原始需求
-    user_prompt = state.get("refined_prompt") or state["user_prompt"]
+    # 确定当前任务和是否是首轮
+    round_count = state.get("round_count", 0)
+    is_first_round = round_count == 0
     
-    # 构建 prompt
+    # 当前任务：优先使用 current_task，否则使用 refined_prompt
+    current_task = state.get("current_task") or state.get("refined_prompt") or state["user_prompt"]
+    
+    # 获取之前的分析结果（用于后续轮）
+    all_outputs = state.get("all_execution_outputs", [])
+    previous_results = None
+    if not is_first_round and all_outputs:
+        previous_results = "\n\n---\n\n".join([
+            f"【第 {i+1} 轮分析】\n{output}"
+            for i, output in enumerate(all_outputs)
+        ])
+    
+    logger.info(f"   - 轮次: {round_count + 1}")
+    logger.info(f"   - 首轮: {is_first_round}")
+    logger.info(f"   - 当前任务: {current_task[:100]}...")
+    
+    # 构建 prompt（区分首轮和后续轮）
     messages = PromptTemplates.format_code_generation_prompt(
         csv_path=state["csv_path"],
         row_count=state["row_count"],
         column_names=state["column_names"],
         column_metadata=state["column_metadata"],
         data_preview=state["data_preview"],
-        user_prompt=user_prompt,
+        user_prompt=current_task,
+        previous_results=previous_results,
+        is_first_round=is_first_round,
     )
     
-    # 收集流式输出的列表（用于后续格式化）
-    stream_chunks = []
+    # 输出标题
+    if is_first_round:
+        _push_to_request_queue(request_id, "\n📝 **正在生成分析代码...**\n\n")
+    else:
+        _push_to_request_queue(request_id, f"\n📝 **正在生成第 {round_count + 1} 轮分析代码...**\n\n")
     
-    def stream_callback(chunk: str):
-        """流式输出回调，收集 token（同时会通过队列实时传递）"""
-        stream_chunks.append(chunk)
-    
-    # 先输出标题（实时传递）
-    _push_to_request_queue(request_id, "\n📝 **正在生成分析代码...**\n\n")
-    
-    # 流式调用 LLM，实时收集输出（每个 token 会通过队列实时传递）
+    # 流式调用 LLM
     response = call_llm(
         client=client,
         messages=messages,
         model=state["model"],
         temperature=state["temperature"],
         stream=True,
-        stream_callback=stream_callback,
         request_id=request_id,
     )
     
-    # 在控制台打印LLM的完整响应
     logger.info("=" * 80)
-    logger.info("📝 [代码生成] LLM 完整响应:")
-    logger.info("=" * 80)
+    logger.info(f"📝 [代码生成] LLM 完整响应 (轮次 {round_count + 1}):")
     logger.info(response)
     logger.info("=" * 80)
     
@@ -475,33 +437,21 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     
     if code:
         logger.info(f"✅ [Node] 成功生成代码，长度: {len(code)} 字符")
-        # 注意：代码已经在流式调用时实时推送过了，不需要再次推送格式化代码
-        
-        # 构建流式输出（用于状态记录）
-        # 注意：所有内容（标题、流式token）都已经在节点执行时实时推送过了
-        # stream_output 保留为空，避免重复推送
-        stream_output = []
-        
         return {
             "phase": AnalysisPhase.CODE_EXECUTION.value,
             "current_code": code,
             "code_history": [code],
             "messages": messages + [{"role": "assistant", "content": response}],
-            "stream_output": stream_output,
+            "stream_output": [],
         }
     else:
         logger.warning("⚠️ [Node] 未能从 LLM 响应中提取代码")
-        _push_to_request_queue(request_id, f"\n\n⚠️ 未生成代码，LLM 直接返回：\n\n{response}\n\n")
-        
-        # 注意：所有内容都已经在节点执行时实时推送过了
-        # stream_output 保留为空，避免重复推送
-        stream_output = []
-        
+        _push_to_request_queue(request_id, f"\n\n⚠️ 未生成代码，直接返回分析结果\n\n")
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "current_output": response,
             "messages": messages + [{"role": "assistant", "content": response}],
-            "stream_output": stream_output,
+            "stream_output": [],
         }
 
 
@@ -612,12 +562,14 @@ plt.rcParams['axes.unicode_minus'] = False
             _push_to_request_queue(request_id, "\n✅ **代码执行完毕**\n\n")
             _push_to_request_queue(request_id, "📊 **执行结果：**\n\n")
             _push_to_request_queue(request_id, f"```\n{output}\n```\n\n")
-            _push_to_request_queue(request_id, "正在生成分析报告...\n\n")
+            _push_to_request_queue(request_id, "正在评估分析完整性...\n\n")
         else:
             # 默认不显示具体执行结果
-            _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在生成分析报告...**\n\n")
+            _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在评估分析完整性...**\n\n")
+        
+        # 成功后进入分析完整性评估节点（新流程）
         return {
-            "phase": AnalysisPhase.REPORT_GENERATION.value,
+            "phase": AnalysisPhase.EVALUATE_COMPLETENESS.value,
             "current_output": output,
             "execution_success": True,
             "execution_history": [execution],
@@ -730,57 +682,204 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         }
 
 
-def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
+def evaluate_completeness_node(state: AnalysisState) -> Dict[str, Any]:
     """
-    报告生成节点
+    分析完整性评估节点（新增）
     
-    根据代码执行结果，调用 LLM 生成分析报告
+    判断当前分析是否已经充分回答了用户的问题，是否需要进行更多的深入分析。
+    
+    功能：
+    1. 评估当前分析结果的覆盖度和深度
+    2. 判断是否需要进行更多分析
+    3. 如果需要，生成下一轮分析的具体方向
     """
-    logger.info("📄 [Node] 报告生成节点开始执行")
+    logger.info("🔍 [Node] 分析完整性评估节点开始执行")
     
     # 获取请求ID（用于多线程隔离）
     request_id = state.get("request_id", "")
     
+    # 获取当前轮次和最大轮次
+    current_round = state.get("round_count", 1)
+    max_rounds = state.get("max_analysis_rounds", 3)
+    
+    logger.info(f"   - 当前轮次: {current_round}/{max_rounds}")
+    
+    # 如果已达到最大轮数，直接去报告生成
+    if current_round >= max_rounds:
+        logger.info(f"📊 已达到最大分析轮数 ({max_rounds})，进入报告生成")
+        _push_to_request_queue(request_id, f"\n📊 已完成 {current_round} 轮分析（达到最大轮数），正在生成最终报告...\n\n")
+        return {
+            "phase": AnalysisPhase.REPORT_GENERATION.value,
+            "need_more_analysis": False,
+            "stream_output": [],
+        }
+    
     # 创建 LLM 客户端
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
-    # 获取最后执行的代码和输出
-    code = state.get("current_code", "")
-    output = state.get("current_output", "")
+    # 获取之前的输出
+    previous_outputs = state.get("all_execution_outputs", [])
+    current_output = state.get("current_output", "")
     
-    # 如果没有执行输出，使用代码历史中的最后一个
-    if not output and state.get("execution_history"):
-        last_execution = state["execution_history"][-1]
-        code = last_execution.code
-        output = last_execution.output
+    # 构建评估 prompt（使用新格式）
+    messages = PromptTemplates.format_evaluate_completeness_prompt(
+        user_prompt=state["user_prompt"],
+        analysis_tasks=state.get("analysis_tasks", []),
+        current_output=current_output,
+        previous_outputs=previous_outputs,
+        completed_tasks=state.get("completed_tasks", []),
+        current_round=current_round,
+        max_rounds=max_rounds,
+    )
     
-    # 构建报告 prompt（包含表头元数据）
+    # 流式调用 LLM 评估（不实时输出，避免显示 JSON）
+    response = call_llm(
+        client=client,
+        messages=messages,
+        model=state["model"],
+        temperature=0.3,  # 较低温度，更确定性的判断
+        stream=True,
+        push_to_queue=False,  # 不推送到队列，避免输出JSON
+        request_id=request_id,
+    )
+    
+    # 在控制台打印LLM的完整响应
+    logger.info("=" * 80)
+    logger.info(f"🔍 [分析完整性评估] LLM 完整响应 (轮次 {current_round}/{max_rounds}):")
+    logger.info("=" * 80)
+    logger.info(response)
+    logger.info("=" * 80)
+    
+    # 解析 JSON 响应
+    import json
+    try:
+        # 尝试提取 JSON（可能包含 markdown 代码块）
+        json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(1)
+        else:
+            # 尝试直接解析整个响应
+            json_str = response
+        
+        eval_result = json.loads(json_str.strip())
+    except (json.JSONDecodeError, AttributeError) as e:
+        logger.warning(f"⚠️ [Node] 无法解析评估结果: {e}")
+        # 如果解析失败，默认不需要更多分析
+        eval_result = {
+            "need_more_analysis": False,
+            "reason": "评估结果解析失败，默认结束分析",
+            "completed_aspects": [],
+            "missing_aspects": [],
+            "next_direction": "",
+        }
+    
+    # 获取评估结果（使用新字段名）
+    need_more = eval_result.get("need_more_analysis", False)
+    reason = eval_result.get("reason", "")
+    completed_tasks_new = eval_result.get("completed_tasks", [])
+    next_task = eval_result.get("next_task", "")
+    
+    logger.info(f"   - 需要更多分析: {need_more}")
+    logger.info(f"   - 理由: {reason}")
+    if need_more:
+        logger.info(f"   - 下一步任务: {next_task}")
+    
+    if need_more and next_task:
+        # 需要继续分析
+        logger.info(f"🔄 需要更多分析，下一任务: {next_task}")
+        _push_to_request_queue(request_id, f"\n🔄 **继续分析（第 {current_round + 1} 轮）**\n\n")
+        _push_to_request_queue(request_id, f"**任务：** {next_task}\n\n")
+        
+        return {
+            "phase": AnalysisPhase.CODE_GENERATION.value,
+            "need_more_analysis": True,
+            "current_task": next_task,  # 更新当前任务
+            "completed_tasks": completed_tasks_new,  # 已完成的任务
+            "all_execution_outputs": [current_output],  # 累积执行输出
+            "stream_output": [],
+            # 兼容旧字段
+            "next_analysis_direction": next_task,
+            "completed_directions": completed_tasks_new,
+        }
+    else:
+        # 分析已完成
+        logger.info("✅ 分析已完成，进入报告生成")
+        _push_to_request_queue(request_id, f"\n✅ **分析完成**（共 {current_round} 轮），正在生成报告...\n\n")
+        
+        return {
+            "phase": AnalysisPhase.REPORT_GENERATION.value,
+            "need_more_analysis": False,
+            "completed_tasks": completed_tasks_new,
+            "all_execution_outputs": [current_output],  # 累积执行输出
+            "stream_output": [],
+            # 兼容旧字段
+            "completed_directions": completed_tasks_new,
+        }
+
+
+def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
+    """
+    报告生成节点
+    
+    职责：综合所有分析结果，生成最终报告
+    """
+    logger.info("📄 [Node] 报告生成节点开始执行")
+    
+    request_id = state.get("request_id", "")
+    client = create_llm_client(state["api_url"], state.get("api_key"))
+    
+    # 获取分析类型和轮次
+    analysis_type = state.get("analysis_type", "overview")
+    round_count = state.get("round_count", 1)
+    
+    logger.info(f"   - 分析类型: {analysis_type}")
+    logger.info(f"   - 共完成 {round_count} 轮分析")
+    
+    # 整合所有分析结果
+    all_outputs = state.get("all_execution_outputs", [])
+    current_output = state.get("current_output", "")
+    
+    # 构建结果文本
+    all_results_parts = []
+    
+    # 添加之前轮次的输出
+    for i, out in enumerate(all_outputs, 1):
+        if out and out.strip():
+            all_results_parts.append(f"### 第 {i} 轮分析结果\n\n```\n{out}\n```")
+    
+    # 添加当前输出
+    if current_output and current_output not in all_outputs:
+        round_num = len(all_outputs) + 1
+        all_results_parts.append(f"### 第 {round_num} 轮分析结果\n\n```\n{current_output}\n```")
+    
+    all_results = "\n\n".join(all_results_parts) if all_results_parts else f"```\n{current_output}\n```"
+    
+    # 如果没有输出，尝试从执行历史获取
+    if not all_results.strip() or all_results == "```\n\n```":
+        if state.get("execution_history"):
+            last_execution = state["execution_history"][-1]
+            all_results = f"```\n{last_execution.output}\n```"
+    
+    # 构建报告 prompt（使用新格式）
     messages = PromptTemplates.format_report_generation_prompt(
         user_prompt=state["user_prompt"],
-        code=code,
-        execution_output=output,
+        analysis_type=analysis_type,
+        total_rounds=round_count,
+        all_results=all_results,
         column_names=state.get("column_names", []),
         column_metadata=state.get("column_metadata", {}),
     )
     
-    # 收集流式输出的列表（用于后续格式化）
-    stream_chunks = []
-    
-    def stream_callback(chunk: str):
-        """流式输出回调，收集 token（同时会通过队列实时传递）"""
-        stream_chunks.append(chunk)
-    
-    # 先输出标题（实时传递）
+    # 输出标题
     _push_to_request_queue(request_id, "\n📄 **正在生成分析报告...**\n\n")
     
-    # 流式调用 LLM 生成报告（每个 token 会通过队列实时传递）
+    # 流式调用 LLM 生成报告
     report = call_llm(
         client=client,
         messages=messages,
         model=state["model"],
         temperature=state["temperature"],
         stream=True,
-        stream_callback=stream_callback,
         request_id=request_id,
     )
     
@@ -809,16 +908,16 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
 # 条件路由函数
 # ============================================================================
 
-def route_after_execution(state: AnalysisState) -> Literal["fix_code", "generate_report"]:
+def route_after_execution(state: AnalysisState) -> Literal["fix_code", "evaluate_completeness"]:
     """
     执行后路由决策
     
     根据执行结果决定下一步：
-    - 执行成功 → 生成报告
+    - 执行成功 → 评估分析完整性（新流程）
     - 执行失败 → 修复代码
     """
     if state.get("execution_success", False):
-        return "generate_report"
+        return "evaluate_completeness"
     else:
         return "fix_code"
 
@@ -837,6 +936,20 @@ def route_after_fix(state: AnalysisState) -> Literal["execute_code", "generate_r
         return "generate_report"
 
 
+def route_after_evaluation(state: AnalysisState) -> Literal["generate_code", "generate_report"]:
+    """
+    评估后路由决策（新增）
+    
+    根据评估结果决定下一步：
+    - 需要更多分析 → 回到代码生成（形成循环）
+    - 分析已完成 → 生成报告
+    """
+    if state.get("need_more_analysis", False):
+        return "generate_code"
+    else:
+        return "generate_report"
+
+
 # ============================================================================
 # 工作流图构建
 # ============================================================================
@@ -845,15 +958,17 @@ def create_analysis_graph() -> StateGraph:
     """
     创建数据分析工作流图
     
-    工作流结构：
+    工作流结构（支持多轮分析）：
     
     START → analyze_intent ─┬─(需要澄清)─→ END
                             │
-                            └─(可以分析)─→ generate_code → execute_code ─┬─(成功)─→ generate_report → END
-                                                                          │
-                                                                          └─(失败)─→ fix_code ─┬─(有修复)─→ execute_code
-                                                                                              │
-                                                                                              └─(无法修复)─→ generate_report
+                            └─(可以分析)─→ generate_code → execute_code ─┬─(成功)─→ evaluate_completeness ─┬─(需要更多)─→ generate_code (循环)
+                                              ↑                          │                                 │
+                                              │                          │                                 └─(完成)─→ generate_report → END
+                                              │                          │
+                                              │                          └─(失败)─→ fix_code ─┬─(有修复)─→ execute_code
+                                              │                                              │
+                                              └──────────────────────────────────────────────┴─(无法修复)─→ generate_report
     
     Returns:
         编译后的 StateGraph
@@ -866,6 +981,7 @@ def create_analysis_graph() -> StateGraph:
     workflow.add_node("generate_code", generate_code_node)
     workflow.add_node("execute_code", execute_code_node)
     workflow.add_node("fix_code", fix_code_node)
+    workflow.add_node("evaluate_completeness", evaluate_completeness_node)  # 新增：分析完整性评估节点
     workflow.add_node("generate_report", generate_report_node)
     
     # 添加边
@@ -904,13 +1020,13 @@ def create_analysis_graph() -> StateGraph:
     # 处理需要澄清的情况（直接结束）
     # 注意：analyze_intent 节点如果返回 USER_CLARIFICATION_NEEDED，会通过条件边路由到 END
     
-    # execute_code → fix_code 或 generate_report
+    # execute_code → fix_code 或 evaluate_completeness（新流程）
     workflow.add_conditional_edges(
         "execute_code",
         route_after_execution,
         {
             "fix_code": "fix_code",
-            "generate_report": "generate_report",
+            "evaluate_completeness": "evaluate_completeness",  # 成功后去评估节点
         }
     )
     
@@ -921,6 +1037,16 @@ def create_analysis_graph() -> StateGraph:
         {
             "execute_code": "execute_code",
             "generate_report": "generate_report",
+        }
+    )
+    
+    # evaluate_completeness → generate_code (需要更多分析) 或 generate_report (完成)
+    workflow.add_conditional_edges(
+        "evaluate_completeness",
+        route_after_evaluation,
+        {
+            "generate_code": "generate_code",  # 循环回到代码生成
+            "generate_report": "generate_report",  # 进入报告生成
         }
     )
     
@@ -1029,6 +1155,7 @@ class DataAnalysisGraph:
         temperature: float = 0.4,
         analysis_timeout: Optional[int] = None,
         debug_print_execution_output: bool = False,
+        max_analysis_rounds: int = 3,  # 新增：最大分析轮数
     ) -> Generator[str, None, AnalysisResult]:
         """
         执行数据分析（流式输出）
@@ -1037,6 +1164,12 @@ class DataAnalysisGraph:
         在节点执行过程中，LLM 的每个 token 都会实时传递
         
         每个请求使用独立的队列，确保多线程安全。
+        
+        支持多轮分析：系统会自动评估分析完整性，如果需要更多分析，
+        会继续生成代码并执行，直到分析完成或达到最大轮数。
+        
+        Args:
+            max_analysis_rounds: 最大分析轮数（默认3轮），防止无限循环
         
         Yields:
             str: 流式输出的字符串块
@@ -1048,7 +1181,7 @@ class DataAnalysisGraph:
         
         # 为每个请求生成唯一的 request_id（用于队列隔离）
         request_id = f"req-{uuid.uuid4().hex[:16]}"
-        logger.info(f"🚀 开始分析请求: {request_id}")
+        logger.info(f"🚀 开始分析请求: {request_id}，最大分析轮数: {max_analysis_rounds}")
         
         # 为该请求创建独立的队列（多线程安全）
         request_queue = _create_request_queue(request_id)
@@ -1070,6 +1203,7 @@ class DataAnalysisGraph:
                 temperature=temperature,
                 request_id=request_id,  # 传递请求ID
                 debug_print_execution_output=debug_print_execution_output,  # 传递调试配置
+                max_analysis_rounds=max_analysis_rounds,  # 传递最大分析轮数
             )
             
             # 在后台线程中执行工作流

@@ -2,6 +2,11 @@
 Prompt Templates for Data Analysis
 
 定义数据分析各阶段使用的 Prompt 模板
+
+重构设计原则：
+1. 任务驱动：每轮分析都有明确的"分析任务"
+2. 上下文连贯：各节点共享分析上下文
+3. 职责单一：每个节点只做一件事
 """
 
 from typing import Dict, Any, List, Optional
@@ -11,401 +16,156 @@ class PromptTemplates:
     """Prompt 模板管理类"""
     
     # ========================================
-    # 意图分析和策略制定 Prompt（银行场景）
+    # 共享的数据信息模板（供各节点复用）
     # ========================================
     
-    INTENT_ANALYSIS_SYSTEM = """你是一个银行数据分析专家，专门负责理解用户的分析需求并制定分析策略。
-
-## 你的任务
-
-1. **意图识别**：分析用户输入是否与提供的数据相关
-2. **需求理解**：如果相关，猜测用户的真实分析目的
-3. **策略制定**：制定具体的分析方向和策略
-
-## 银行数据分析常见场景
-
-- 客户分析：客户画像、客户分群、客户流失分析
-- 交易分析：交易趋势、异常交易检测、交易模式分析
-- 风险分析：信用风险、操作风险、市场风险
-- 业务分析：产品分析、渠道分析、业绩分析
-- 财务分析：收入分析、成本分析、利润分析
-- 合规分析：反洗钱、合规检查、审计分析
-
-## 表头单位识别和处理
-
-**重要：在分析数据时，必须识别表头中的单位信息，并在计算时进行正确的单位转换：**
-
-1. **单位识别**：仔细检查列名中是否包含单位信息，常见格式包括：
-   - `收入(万元)` - 数据值是万元数值（如100表示100万元）
-   - `占比(%)` - 数据值是百分比数值（如20表示20%）
-   - `增长率(%)` - 数据值是百分比数值（如20表示20%）
-   - `金额(元)` - 数据值以"元"为单位
-   - 其他类似的单位标注
-
-2. **单位转换策略（关键）**：
-   - **百分比单位**：如果表头包含 `(%)`、`(百分比)` 等，数据值是百分比数值，**在计算时必须除以100**（或乘以0.01）
-     - 例如：`增长率(%)` 数据值是 `20`，表示 `20%`，计算时应该 `原值 * 20 / 100`，而不是 `原值 * 20`
-     - 例如：`占比(%)` 数据值是 `30`，表示 `30%`，计算时应该 `原值 * 30 / 100`
-   - **万元单位**：如果表头包含 `(万元)`、`(万)` 等，数据值是万元数值，**如果需要转换为元，必须乘以10000**
-     - 例如：`收入(万元)` 数据值是 `100`，表示 `100万元`，转换为元应该是 `100 * 10000 = 1000000元`
-   - **元单位**：如果表头包含 `(元)`，数据值已经是元，不需要转换
-
-3. **策略制定要求**：
-   - 在 `analysis_strategy` 中，如果发现表头包含单位信息，必须明确说明在计算时如何进行单位转换
-   - 在 `research_directions` 中，可以包含"单位识别和转换"作为研究方向之一
-   - **特别注意**：百分比单位的数据在计算时必须除以100，这是最容易出错的地方
-
-## 输出格式要求
-
-请以 JSON 格式输出，包含以下字段：
-
-```json
-{
-    "is_relevant": true/false,  // 用户输入是否与数据相关
-    "needs_clarification": true/false,  // 是否需要用户澄清
-    "clarification_message": "如果需要澄清，提供澄清消息",
-    "refined_prompt": "重写后的用户需求（更明确、具体）",
-    "analysis_strategy": "分析策略说明",
-    "research_directions": ["研究方向1", "研究方向2", ...]
-}
-```
-
-## 判断标准
-
-### 直接简单问题（不需要澄清，需要简单直接回答）
-以下类型的直接简单问题应该被视为有效需求，**needs_clarification=false**，且需要在 **refined_prompt** 中明确标注为简单查询：
-- "这个表格有多少行？"
-- "有多少列？"
-- "显示前5行数据"
-- "某个字段的最大值是多少？"
-- "某个字段有多少个不同的值？"
-- "某个字段的最小值是多少？"
-- "某个字段的平均值是多少？"
-- 其他类似的简单查询问题
-
-对于直接简单问题，应该：
-- **is_relevant=true**
-- **needs_clarification=false**
-- **refined_prompt**: 保持原问题的简洁性，明确标注为简单查询，例如："【简单查询】这个表格有多少行？" 或直接使用原问题
-- **analysis_strategy**: "简单查询，直接回答用户问题，不需要进行额外的分析或扩展"
-- **research_directions**: ["简单查询"]
-
-### 概述性问题（不需要澄清，需要全面分析）
-以下类型的概述性问题应该被视为有效需求，**needs_clarification=false**：
-- "这个表格主要讲了什么？"
-- "帮我看看这个数据"
-- "分析一下这个表格"
-- "这个数据有什么特点？"
-- "给我一个数据概览"
-- "总结一下这个表格"
-- "这个数据怎么样？"
-- "数据概况是什么？"
-
-对于概述性问题，应该：
-- **is_relevant=true**
-- **needs_clarification=false**
-- **refined_prompt**: 扩展为"对数据进行全面分析，包括：1. 数据概览和统计摘要 2. 各字段分布情况 3. 数据质量检查 4. 关键指标识别 5. 数据特征总结"
-- **analysis_strategy**: 制定通用的数据探索性分析策略，包括数据维度、字段类型、数值分布、缺失值情况、异常值检测等
-- **research_directions**: ["数据概览", "字段统计分析", "数据质量检查", "关键指标识别", "数据特征总结"]
-
-### 具体分析问题（不需要澄清，需要深入分析）
-用户提出了明确的分析方向或目标，应该：
-- **is_relevant=true**
-- **needs_clarification=false**
-- 根据用户需求制定具体的分析策略
-
-### 需要澄清的问题（needs_clarification=true）
-只有在以下情况下才需要澄清：
-- 用户输入完全无法理解（如单个字符、乱码、无意义的符号）
-- 用户输入过于简短且无上下文（如仅"分析"、"看看"、"帮我"等，且无法从数据上下文推断意图）
-- 用户输入明显不完整（如"分析客户"但没有说明要分析客户的什么方面）
-
-### 无关问题（is_relevant=false）
-- 与数据完全无关的问题（如问天气、问其他业务、问系统使用等）
-
-## 示例说明
-
-### 示例1：直接简单问题（简单查询）
-用户输入："这个表格有多少行？"
-输出：
-```json
-{
-    "is_relevant": true,
-    "needs_clarification": false,
-    "refined_prompt": "这个表格有多少行？",
-    "analysis_strategy": "简单查询，直接回答用户问题，不需要进行额外的分析或扩展",
-    "research_directions": ["简单查询"]
-}
-```
-
-### 示例2：概述性问题（需要全面分析）
-用户输入："这个表格主要讲了什么？"
-输出：
-```json
-{
-    "is_relevant": true,
-    "needs_clarification": false,
-    "refined_prompt": "对数据进行全面分析，包括：1. 数据概览和统计摘要 2. 各字段分布情况 3. 数据质量检查 4. 关键指标识别 5. 数据特征总结",
-    "analysis_strategy": "进行全面的数据探索性分析，包括数据维度、字段类型、数值分布、缺失值情况、异常值检测等，生成数据概览报告",
-    "research_directions": ["数据概览", "字段统计分析", "数据质量检查", "关键指标识别", "数据特征总结"]
-}
-```
-
-### 示例3：具体分析问题（需要深入分析）
-用户输入："分析客户流失情况"
-输出：
-```json
-{
-    "is_relevant": true,
-    "needs_clarification": false,
-    "refined_prompt": "分析客户流失情况，包括：1. 流失客户数量及占比 2. 流失客户特征分析 3. 流失原因分析 4. 流失趋势预测",
-    "analysis_strategy": "从客户数据中识别流失客户，分析流失客户的共同特征，计算流失率，预测未来流失趋势",
-    "research_directions": ["流失客户识别和统计", "流失客户特征分析", "流失率计算", "流失趋势分析"]
-}
-```
-
-### 示例4：需要澄清的问题
-用户输入："分析"
-输出：
-```json
-{
-    "is_relevant": true,
-    "needs_clarification": true,
-    "clarification_message": "您的分析需求不够明确。请具体说明：1. 想分析哪些指标？2. 关注哪些维度？3. 希望得到什么结论？"
-}
-```
-"""
-
-    INTENT_ANALYSIS_USER = """## 数据文件信息
+    DATA_INFO_TEMPLATE = """## 数据信息
 
 - **文件路径**: {csv_path}
 - **数据行数**: {row_count}
 - **列名**: {column_names}
 
-## 列详细信息
-
+### 列详细信息
 {column_metadata}
 
-## 数据预览（前几行）
-
+### 数据预览
 {data_preview}
-
-## 用户原始输入
-
-{user_prompt}
-
-请分析用户输入与数据的相关性，如果相关则重写用户需求并制定分析策略，如果不相关则返回澄清消息。
-
-**特别注意：**
-1. **直接简单问题**：如果用户询问的是简单查询（如"有多少行"、"显示前几行"、"某个字段的最大值"等），应该：
-   - 识别为简单查询，**refined_prompt** 保持原问题的简洁性
-   - **analysis_strategy** 标注为"简单查询，直接回答用户问题"
-   - **不要**扩展为复杂的分析需求
-
-2. **概述性问题**：如果用户询问数据概述、数据概览、数据总结、表格主要内容等，应该：
-   - 视为有效需求，自动生成全面的数据分析策略，**不要要求澄清**
-   - 制定通用的数据探索性分析策略，包括数据维度、字段统计、数据质量、关键指标等
-
-3. **澄清判断**：只有用户输入完全无法理解或过于简短无上下文时，才需要澄清
-
-4. **表头单位处理**：在分析列名时，注意识别表头中的单位信息（如"收入(万元)"、"占比(%)"、"增长率(%)"等），并在分析策略中明确说明在计算时如何进行单位转换。特别注意：百分比单位的数据在计算时必须除以100
 """
 
     # ========================================
-    # 代码生成 Prompt
+    # 1. 意图分析 Prompt
+    # 职责：理解用户需求，制定分析计划
     # ========================================
     
-    CODE_GENERATION_SYSTEM = """你是一个专业的数据分析专家。你的任务是根据用户需求编写 Python 代码来分析数据。
+    INTENT_ANALYSIS_SYSTEM = """你是数据分析专家。你的任务是理解用户需求，制定分析计划。
 
-## 代码编写规范
+## 任务
 
-1. **数据读取**：使用 pandas 读取 CSV 文件
-2. **输出方式**：所有分析结果必须通过 `print()` 输出
-3. **输出格式**：使用清晰的中文标题分隔各部分输出
-4. **错误处理**：添加必要的异常处理
-5. **代码完整性**：生成完整可执行的 Python 脚本
+1. 判断用户输入是否与数据相关
+2. 理解用户真实意图
+3. 制定分析计划（分解为具体的分析任务）
 
-## 重要：禁止硬编码分析结果
+## 问题分类
 
-**严禁在 print 语句中硬编码分析结论或错误信息！**
+### 简单查询（直接回答）
+- "有多少行/列？"、"显示前N行"、"某字段最大值"等
+- **不需要多轮分析**，标记 `analysis_type: "simple"`
 
-❌ **错误示例（禁止）：**
-```python
-print("   - 2131列缺失率达86.7%，建议核实数据来源")
-print("   - 所有数值型字段无缺失值，数据完整性良好")
-print("   - 总销售额与线上/线下销售额存在验证差异")
+### 概述性问题（全面分析）  
+- "分析这个数据"、"数据有什么特点"等
+- **可能需要多轮分析**，标记 `analysis_type: "overview"`
+
+### 具体分析（深入分析）
+- "分析客户流失"、"对比A和B的差异"等
+- **可能需要多轮分析**，标记 `analysis_type: "specific"`
+
+## 输出格式（JSON）
+
+```json
+{
+    "is_relevant": true/false,
+    "needs_clarification": true/false,
+    "clarification_message": "如需澄清的消息",
+    "analysis_type": "simple/overview/specific",
+    "refined_prompt": "明确化的分析需求",
+    "analysis_tasks": ["任务1", "任务2", ...],
+    "first_task": "第一轮要完成的具体任务"
+}
 ```
 
-✅ **正确做法：**
-```python
-# 计算缺失率
-missing_rate = df['2131'].isnull().sum() / len(df) * 100
-print(f"2131列缺失率: {{missing_rate:.1f}}%")
+## 关键规则
 
-# 检查数值型字段缺失值
-numeric_cols = df.select_dtypes(include=['number']).columns
-missing_counts = df[numeric_cols].isnull().sum()
-print("数值型字段缺失值统计:")
-print(missing_counts)
+1. **简单查询**：`analysis_tasks` 只包含一个任务，`first_task` 就是用户问题本身
+2. **概述/具体分析**：将需求分解为多个可执行的任务
+"""
 
-# 验证总销售额
-df['验证总销售额'] = df['线上销售额'] + df['线下销售额']
-diff = df['验证总销售额'] - df['总销售额']
-print("总销售额验证差异:")
-print(diff)
-```
+    INTENT_ANALYSIS_USER = """{data_info}
 
-**关键原则：**
-- print 语句必须输出**实际计算的结果**，不能输出预设的结论
-- 所有分析结论必须通过**实际计算**得出，不能硬编码
-- 如果需要进行判断或总结，先计算数据，再基于计算结果输出
-- 使用变量存储计算结果，然后 print 变量，而不是 print 硬编码的字符串
+## 用户输入
 
-## 输出格式要求
+{user_prompt}
 
-请将代码放在 ```python 和 ``` 之间，例如：
+请分析用户意图并制定分析计划。
+"""
 
+    # ========================================
+    # 2. 代码生成 Prompt
+    # 职责：根据分析任务生成 Python 代码
+    # ========================================
+    
+    CODE_GENERATION_SYSTEM = """你是 Python 数据分析专家。你的任务是根据分析任务编写代码。
+
+## 代码规范
+
+1. 使用 pandas 读取 CSV
+2. 所有结果通过 `print()` 输出
+3. 输出使用清晰的中文标题
+4. 代码完整可执行
+
+## 关键规则
+
+1. **禁止硬编码结果**：所有 print 必须输出计算结果，不能输出预设结论
+2. **注意单位**：
+   - 列名含 `(%)` 的，计算时需除以100
+   - 列名含 `(万元)` 的，转换为元需乘以10000
+3. **禁止生成图片**：不使用 plt.show()
+
+## 输出格式
+
+只输出代码块：
 ```python
 import pandas as pd
 
 # 你的代码
-print("结果")
 ```
-
-## 表头单位处理（重要）
-
-**必须识别表头中的单位信息，并在计算时进行正确的单位转换：**
-
-1. **单位识别**：检查列名中是否包含单位信息，常见格式：
-   - `收入(万元)`、`收入(万)` - 数据值是万元数值（如100表示100万元）
-   - `占比(%)`、`占比(百分比)` - 数据值是百分比数值（如20表示20%）
-   - `增长率(%)` - 数据值是百分比数值（如20表示20%）
-   - `金额(元)` - 数据值以"元"为单位
-
-2. **单位转换规则（关键）**：
-   - **百分比单位**：如果表头包含 `(%)`、`(百分比)` 等，**数据值是百分比数值，在计算时必须除以100**
-     - 例如：`增长率(%)` 数据值是 `20`，表示 `20%`，计算时应该 `原值 * 20 / 100`，而不是 `原值 * 20`
-     - 例如：`占比(%)` 数据值是 `30`，表示 `30%`，计算时应该 `原值 * 30 / 100`
-   - **万元单位**：如果表头包含 `(万元)`、`(万)` 等，**数据值是万元数值，如果需要转换为元，必须乘以10000**
-     - 例如：`收入(万元)` 数据值是 `100`，表示 `100万元`，转换为元应该是 `100 * 10000 = 1000000元`
-   - **元单位**：如果表头包含 `(元)`，数据值已经是元，不需要转换
-
-3. **代码处理示例**：
-   ```python
-   # ✅ 正确示例：识别单位并在计算时进行转换
-   
-   # 示例1：增长率(%) - 必须除以100
-   if '增长率(%)' in df.columns:
-       base_value = 1000
-       growth_rate = df['增长率(%)'].iloc[0]  # 假设是20
-       # 正确：1000 * 20 / 100 = 200
-       result = base_value * growth_rate / 100
-       print(f"增长率: {{growth_rate}}%，计算结果: {{result}}")
-       # ❌ 错误：result = base_value * growth_rate  # 错误！应该是 1000 * 20 / 100，而不是 1000 * 20
-   
-   # 示例2：占比(%) - 必须除以100
-   if '占比(%)' in df.columns:
-       total = 1000
-       ratio = df['占比(%)'].iloc[0]  # 假设是30
-       # 正确：1000 * 30 / 100 = 300
-       part = total * ratio / 100
-       print(f"占比: {{ratio}}%，计算结果: {{part}}")
-   
-   # 示例3：收入(万元) - 转换为元时需要乘以10000
-   if '收入(万元)' in df.columns:
-       income_wan = df['收入(万元)'].sum()  # 假设是100万元
-       print(f"总收入: {{income_wan:.2f}} 万元")
-       # 如果需要转换为元
-       income_yuan = income_wan * 10000
-       print(f"总收入（元）: {{income_yuan:.2f}} 元")
-   ```
-
-4. **单位处理原则**：
-   - 识别列名中的单位标注（括号内的单位信息）
-   - **在计算时，根据单位进行正确的转换**：百分比除以100，万元转元乘以10000
-   - 在输出结果时，明确标注单位，避免单位混淆
-   - **特别注意**：百分比单位的数据在计算时必须除以100，这是最容易出错的地方
-
-## 注意事项
-
-- 不要使用 plt.show()，禁止生成包含图片生成的代码。
-- 确保代码可以独立运行
-- 使用中文进行输出和注释
-- 根据用户需求生成相应的代码：如果需求简单直接，生成简单代码；如果需求复杂，生成完整分析代码
-- **禁止硬编码分析结果，所有输出必须基于实际计算**
-- **必须识别并正确处理表头中的单位信息，避免单位混淆**
 """
 
-    CODE_GENERATION_USER = """## 数据文件信息
+    # 首轮代码生成
+    CODE_GENERATION_USER_FIRST = """{data_info}
 
-- **文件路径**: {csv_path}
-- **数据行数**: {row_count}
-- **列名**: {column_names}
+## 分析任务
 
-## 列详细信息
+{analysis_task}
 
-{column_metadata}
+请编写 Python 代码完成此任务。注意：所有结果必须通过 print() 输出，禁止硬编码结论。
+"""
 
-## 数据预览（前几行）
+    # 后续轮代码生成（有之前的分析结果）
+    CODE_GENERATION_USER_CONTINUE = """{data_info}
 
-{data_preview}
+## 之前的分析结果
 
-## 分析需求
+{previous_results}
 
-{user_prompt}
+## 当前分析任务
 
-请根据以上信息，编写 Python 代码进行数据分析。确保代码完整可执行，所有结果通过 print() 输出。
+{analysis_task}
 
-**重要提醒：**
-- 所有 print 语句必须输出**实际计算的结果**，不能硬编码分析结论
-- 必须先进行计算，然后 print 计算结果，不能 print 预设的结论或错误信息
-- 例如：应该 `print(f"缺失率: {{missing_rate:.1f}}%")` 而不是 `print("缺失率达86.7%")`
-
-**表头单位处理（重要）：**
-- 仔细检查列名中是否包含单位信息（如"收入(万元)"、"占比(%)"、"增长率(%)"等）
-- **百分比单位转换**：如果表头包含 `(%)`、`(百分比)` 等，数据值是百分比数值，**在计算时必须除以100**
-  - 例如：`增长率(%)` 数据值是 `20`，表示 `20%`，计算时应该 `原值 * 20 / 100`，而不是 `原值 * 20`
-  - 例如：`占比(%)` 数据值是 `30`，表示 `30%`，计算时应该 `原值 * 30 / 100`
-- **万元单位转换**：如果表头包含 `(万元)`、`(万)` 等，数据值是万元数值，**如果需要转换为元，必须乘以10000**
-  - 例如：`收入(万元)` 数据值是 `100`，表示 `100万元`，转换为元应该是 `100 * 10000 = 1000000元`
-- 在输出结果时，明确标注单位，避免单位混淆
-- 例如：
-  ```python
-  # 示例1：增长率(%) - 必须除以100
-  if '增长率(%)' in df.columns:
-      base_value = 1000
-      growth_rate = df['增长率(%)'].iloc[0]  # 假设是20
-      # ✅ 正确：1000 * 20 / 100 = 200
-      result = base_value * growth_rate / 100
-      print(f"增长率: {{growth_rate}}%，计算结果: {{result}}")
-      # ❌ 错误：result = base_value * growth_rate  # 错误！应该是 1000 * 20 / 100，而不是 1000 * 20
-      
-  # 示例2：收入(万元) - 转换为元时需要乘以10000
-  if '收入(万元)' in df.columns:
-      income_wan = df['收入(万元)'].sum()  # 假设是100万元
-      print(f"总收入: {{income_wan:.2f}} 万元")
-      # 如果需要转换为元
-      income_yuan = income_wan * 10000
-      print(f"总收入（元）: {{income_yuan:.2f}} 元")
-  ```
+请基于之前的分析结果，编写代码完成当前任务。
+- 不要重复之前已分析的内容
+- 可以引用之前的发现进行深入分析
+- 所有结果通过 print() 输出
 """
 
     # ========================================
-    # 代码修复 Prompt
+    # 3. 代码修复 Prompt
+    # 职责：修复执行失败的代码
     # ========================================
     
-    CODE_FIX_SYSTEM = """你是一个 Python 代码调试专家。用户执行代码时遇到了错误，请帮助修复。
+    CODE_FIX_SYSTEM = """你是 Python 调试专家。请修复代码错误。
 
-## 修复要求
+## 要求
 
-1. 仔细分析错误信息，找出根本原因
-2. 提供修复后的完整代码（不是代码片段）
-3. 确保修复后的代码可以正确执行
-4. 保持原有功能不变
+1. 分析错误原因
+2. 提供完整的修复后代码（不是片段）
+3. 保持原有功能
 
 ## 输出格式
 
-将修复后的完整代码放在 ```python 和 ``` 之间。
+只输出修复后的完整代码：
+```python
+# 修复后的完整代码
+```
 """
 
     CODE_FIX_USER = """## 原始代码
@@ -420,135 +180,195 @@ print("结果")
 {error_message}
 ```
 
-## 数据文件信息
+## 数据信息
 
-- **文件路径**: {csv_path}
-- **列名**: {column_names}
+- 文件路径: {csv_path}
+- 列名: {column_names}
 
-请分析错误原因并提供修复后的完整代码。
+请修复代码。
 """
 
     # ========================================
-    # 报告生成 Prompt
+    # 4. 分析评估 Prompt
+    # 职责：评估分析是否完成，决定下一步
     # ========================================
     
-    REPORT_GENERATION_SYSTEM = """你是一个专业的数据分析报告撰写专家。请根据代码执行结果，撰写一份结构清晰、内容详实的数据分析报告。
+    EVALUATE_COMPLETENESS_SYSTEM = """你是数据分析质量评估专家。判断当前分析是否满足用户需求。
 
-## 重要原则：根据用户问题的直接程度调整报告复杂度
+## 评估标准
 
-**如果用户问题很直接、简单（例如：**
-- "这个表格有多少行？"
-- "有多少列？"
-- "显示前5行数据"
-- "某个字段的最大值是多少？"
-- "某个字段有多少个不同的值？"
-- 其他类似的简单查询问题
+1. **简单查询**：一轮即可完成，直接返回 `need_more_analysis: false`
+2. **概述/具体分析**：检查各分析任务是否都已完成
 
-**那么：**
-- 生成**简洁直接**的回答，直接给出用户问题的答案
-- **不要**进行额外的分析、解读或扩展
-- **不要**添加"概述"、"关键发现"、"详细分析"、"结论与建议"等复杂结构
-- 直接输出答案即可，例如："这个表格有 1000 行数据。"
+## 判断规则
 
-**如果用户问题需要深入分析（例如：**
-- "分析客户流失情况"
-- "这个数据有什么特点？"
-- "进行全面分析"
-- 其他需要多维度分析的问题
+### 返回 need_more_analysis: false 的情况：
+- 简单查询已回答
+- 所有分析任务已完成
+- 已达到最大轮数（第 {current_round}/{max_rounds} 轮）
+- 继续分析不会带来显著新价值
 
-**那么：**
-- 生成**完整的分析报告**，使用以下结构：
-  1. **概述**：简要描述分析目的和数据概况
-  2. **关键发现**：列出最重要的 3-5 个发现
-  3. **详细分析**：对各项分析结果进行解读
-  4. **结论与建议**：基于分析结果给出建议
+### 返回 need_more_analysis: true 的情况：
+- 有重要的分析任务未完成
+- 发现值得深入探索的新方向
+- 用户需求未被充分满足
 
-## 报告格式要求
+## 输出格式（JSON）
 
-使用 Markdown 格式。
+```json
+{{
+    "need_more_analysis": true/false,
+    "reason": "简要理由",
+    "completed_tasks": ["已完成的任务"],
+    "next_task": "如果继续，下一轮的具体任务（必须明确可执行）"
+}}
+```
 
-## 写作要求
+## 重要
 
-- 使用中文撰写
-- 突出重要数据和洞察
-- 语言专业但易于理解
-- 适当使用列表、表格增强可读性
-- **根据用户问题的直接程度，决定报告的复杂度，直接问题用简洁回答，复杂问题用完整报告**
+- 当前是第 {current_round} 轮，最多 {max_rounds} 轮
+- 如果已达上限，必须返回 false
+- `next_task` 必须具体可执行，不能是"继续分析"这样的模糊描述
 """
 
-    REPORT_GENERATION_USER = """## 用户分析需求
+    EVALUATE_COMPLETENESS_USER = """## 用户原始需求
 
 {user_prompt}
 
-## 表头结构信息
+## 分析计划
+
+原定任务：
+{analysis_tasks}
+
+## 当前轮分析结果
+
+```
+{current_output}
+```
+
+## 之前轮次的分析结果
+
+{previous_outputs}
+
+## 已完成的任务
+
+{completed_tasks}
+
+请评估分析是否完成。
+"""
+
+    # ========================================
+    # 5. 报告生成 Prompt
+    # 职责：综合所有分析结果，生成最终报告
+    # ========================================
+    
+    REPORT_GENERATION_SYSTEM = """你是数据分析助手。根据用户的问题和分析结果，直接、准确地回答问题。
+
+## 核心原则
+
+1. **直接回答用户问题**：用户问什么就答什么，不要偏离主题
+2. **简洁明了**：用最少的文字回答，避免冗余和重复
+3. **问题与答案对应**：确保答案完全对应问题，不要答非所问
+4. **基于数据说话**：所有结论必须基于提供的分析结果，不要编造或推测
+
+## 回答方式
+
+### 简单问题（如"有多少行数据？"）
+- 直接给出数字或答案
+- 例如："共有 1000 行数据。"
+
+### 分析类问题（如"分析销售趋势"）
+- 先直接回答核心问题
+- 然后提供支撑数据和分析结果
+- 避免使用固定的报告模板，根据问题灵活组织
+
+### 多轮分析结果
+- 只提取与用户问题相关的部分
+- 不要罗列所有分析结果
+- 综合相关发现，形成针对性的答案
+
+## 禁止事项
+
+- ❌ 不要使用固定的报告模板（如"概述、关键发现、详细分析、结论建议"）
+- ❌ 不要添加用户没有问到的内容
+- ❌ 不要使用过于复杂的结构
+- ❌ 不要答非所问或偏离主题
+- ❌ 不要重复已经说过的内容
+
+## 格式要求
+
+- 使用中文
+- 使用 Markdown 格式（标题、列表、表格等）
+- 重要数据用**粗体**突出
+- 保持简洁，避免冗长
+"""
+
+    REPORT_GENERATION_USER = """## 用户问题
+
+{user_prompt}
+
+**重要：请直接回答上述问题，不要偏离主题。**
+
+## 分析结果
+
+{all_results}
+
+## 数据信息
 
 {column_metadata_info}
 
-## 执行的分析代码
+---
 
-```python
-{code}
-```
-
-## 代码执行输出
-
-```
-{execution_output}
-```
-
-请根据以上信息，撰写一份完整的数据分析报告。在报告中，可以参考表头结构信息来更好地理解数据的层次结构和字段含义。
+**请根据用户问题，从上述分析结果中提取相关信息，直接、简洁地回答。**
+- 如果用户问的是简单问题，直接给出答案
+- 如果用户问的是分析类问题，提供相关分析和数据支撑
+- 确保答案与问题完全对应，不要添加无关内容
 """
 
     # ========================================
-    # 继续分析 Prompt（多轮对话）
+    # 6. 继续分析 Prompt（保留，用于特殊场景）
     # ========================================
     
-    CONTINUE_ANALYSIS_SYSTEM = """你是一个数据分析专家。你正在进行多轮数据分析。
+    CONTINUE_ANALYSIS_SYSTEM = """你是数据分析专家。根据之前的结果决定下一步。
 
-根据之前的执行结果，你可以：
-1. 继续编写更多分析代码（输出 ```python 代码块）
-2. 如果分析已完成，直接输出最终的分析报告（Markdown 格式，不包含代码块）
+## 选择
 
-## 判断标准
-
-- 如果用户的分析需求还未完全满足，继续编写代码
-- 如果已经获得足够的分析结果，输出最终报告
+1. 继续分析：输出 Python 代码块
+2. 分析完成：输出 Markdown 报告
 
 ## 输出格式
 
-- 继续分析：输出 ```python 代码块
-- 完成分析：输出 Markdown 报告（不要包含 ```python 代码块）
+- 继续：```python 代码 ```
+- 完成：Markdown 报告（无代码块）
 """
 
-    CONTINUE_ANALYSIS_USER = """## 之前的代码执行结果
+    CONTINUE_ANALYSIS_USER = """## 之前的执行结果
 
 ```
 {execution_output}
 ```
 
-## 用户的完整分析需求
+## 用户需求
 
 {user_prompt}
 
-请决定是继续分析（输出代码）还是生成最终报告（输出 Markdown）。
+请决定下一步。
 """
 
+    # ========================================
+    # 格式化函数
+    # ========================================
+    
     @classmethod
-    def format_intent_analysis_prompt(
+    def _format_data_info(
         cls,
         csv_path: str,
         row_count: int,
         column_names: List[str],
         column_metadata: Dict[str, Any],
         data_preview: str,
-        user_prompt: str,
-    ) -> List[Dict[str, str]]:
-        """
-        格式化意图分析 Prompt
-        
-        Returns:
-            消息列表 [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}]
-        """
+    ) -> str:
+        """格式化数据信息（供各节点复用）"""
         # 格式化列元数据
         if isinstance(column_metadata, dict):
             metadata_str = "\n".join([
@@ -561,12 +381,31 @@ print("结果")
         # 格式化列名
         columns_str = ", ".join(column_names) if column_names else "未知"
         
-        user_content = cls.INTENT_ANALYSIS_USER.format(
+        return cls.DATA_INFO_TEMPLATE.format(
             csv_path=csv_path,
             row_count=row_count,
             column_names=columns_str,
             column_metadata=metadata_str,
             data_preview=data_preview,
+        )
+    
+    @classmethod
+    def format_intent_analysis_prompt(
+        cls,
+        csv_path: str,
+        row_count: int,
+        column_names: List[str],
+        column_metadata: Dict[str, Any],
+        data_preview: str,
+        user_prompt: str,
+    ) -> List[Dict[str, str]]:
+        """格式化意图分析 Prompt"""
+        data_info = cls._format_data_info(
+            csv_path, row_count, column_names, column_metadata, data_preview
+        )
+        
+        user_content = cls.INTENT_ANALYSIS_USER.format(
+            data_info=data_info,
             user_prompt=user_prompt,
         )
         
@@ -584,33 +423,31 @@ print("结果")
         column_metadata: Dict[str, Any],
         data_preview: str,
         user_prompt: str,
+        previous_results: Optional[str] = None,
+        is_first_round: bool = True,
     ) -> List[Dict[str, str]]:
         """
         格式化代码生成 Prompt
         
-        Returns:
-            消息列表 [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}]
+        Args:
+            previous_results: 之前轮次的分析结果（用于后续轮）
+            is_first_round: 是否是第一轮
         """
-        # 格式化列元数据
-        if isinstance(column_metadata, dict):
-            metadata_str = "\n".join([
-                f"- **{col}**: {info}" 
-                for col, info in column_metadata.items()
-            ])
-        else:
-            metadata_str = str(column_metadata)
-        
-        # 格式化列名
-        columns_str = ", ".join(column_names) if column_names else "未知"
-        
-        user_content = cls.CODE_GENERATION_USER.format(
-            csv_path=csv_path,
-            row_count=row_count,
-            column_names=columns_str,
-            column_metadata=metadata_str,
-            data_preview=data_preview,
-            user_prompt=user_prompt,
+        data_info = cls._format_data_info(
+            csv_path, row_count, column_names, column_metadata, data_preview
         )
+        
+        if is_first_round or not previous_results:
+            user_content = cls.CODE_GENERATION_USER_FIRST.format(
+                data_info=data_info,
+                analysis_task=user_prompt,
+            )
+        else:
+            user_content = cls.CODE_GENERATION_USER_CONTINUE.format(
+                data_info=data_info,
+                previous_results=previous_results,
+                analysis_task=user_prompt,
+            )
         
         return [
             {"role": "system", "content": cls.CODE_GENERATION_SYSTEM},
@@ -641,11 +478,65 @@ print("结果")
         ]
     
     @classmethod
+    def format_evaluate_completeness_prompt(
+        cls,
+        user_prompt: str,
+        analysis_tasks: List[str],
+        current_output: str,
+        previous_outputs: List[str],
+        completed_tasks: List[str],
+        current_round: int,
+        max_rounds: int,
+    ) -> List[Dict[str, str]]:
+        """格式化分析评估 Prompt"""
+        # 格式化分析任务
+        if analysis_tasks:
+            tasks_str = "\n".join([f"- {t}" for t in analysis_tasks])
+        else:
+            tasks_str = "（未明确分析任务）"
+        
+        # 格式化之前的输出
+        if previous_outputs:
+            previous_str = "\n\n---\n\n".join([
+                f"【第 {i+1} 轮】\n```\n{output}\n```"
+                for i, output in enumerate(previous_outputs)
+            ])
+        else:
+            previous_str = "（这是第一轮分析）"
+        
+        # 格式化已完成的任务
+        if completed_tasks:
+            completed_str = "\n".join([f"- {t}" for t in completed_tasks])
+        else:
+            completed_str = "（尚未完成任何任务）"
+        
+        # 格式化 system prompt
+        system_content = cls.EVALUATE_COMPLETENESS_SYSTEM.format(
+            current_round=current_round,
+            max_rounds=max_rounds,
+        )
+        
+        # 格式化 user prompt
+        user_content = cls.EVALUATE_COMPLETENESS_USER.format(
+            user_prompt=user_prompt,
+            analysis_tasks=tasks_str,
+            current_output=current_output,
+            previous_outputs=previous_str,
+            completed_tasks=completed_str,
+        )
+        
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_content},
+        ]
+    
+    @classmethod
     def format_report_generation_prompt(
         cls,
         user_prompt: str,
-        code: str,
-        execution_output: str,
+        analysis_type: str,
+        total_rounds: int,
+        all_results: str,
         column_names: List[str] = None,
         column_metadata: Dict[str, Any] = None,
     ) -> List[Dict[str, str]]:
@@ -655,7 +546,6 @@ print("结果")
             metadata_lines = []
             for col_name, metadata in column_metadata.items():
                 if isinstance(metadata, dict):
-                    # 提取层级信息（level1-level5）
                     levels = []
                     for i in range(1, 6):
                         level_key = f"level{i}"
@@ -670,18 +560,16 @@ print("结果")
                 else:
                     metadata_lines.append(f"- **{col_name}**: {metadata}")
             
-            column_metadata_info = "\n".join(metadata_lines) if metadata_lines else "无表头结构信息"
+            column_metadata_info = "\n".join(metadata_lines) if metadata_lines else "无"
         elif column_names:
-            # 如果没有元数据，至少显示列名
-            column_metadata_info = "列名列表：\n" + "\n".join([f"- {col}" for col in column_names])
+            column_metadata_info = "列名：" + ", ".join(column_names)
         else:
-            column_metadata_info = "无表头结构信息"
+            column_metadata_info = "无"
         
         user_content = cls.REPORT_GENERATION_USER.format(
             user_prompt=user_prompt,
+            all_results=all_results,
             column_metadata_info=column_metadata_info,
-            code=code,
-            execution_output=execution_output,
         )
         
         return [
@@ -705,4 +593,3 @@ print("结果")
             {"role": "system", "content": cls.CONTINUE_ANALYSIS_SYSTEM},
             {"role": "user", "content": user_content},
         ]
-

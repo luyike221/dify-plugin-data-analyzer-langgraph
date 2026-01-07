@@ -311,6 +311,24 @@ class DifyPluginDataAnalyzerTool(Tool):
                 debug_print_header_analysis = debug_print_header_analysis.lower() in ("true", "1", "yes", "on")
             elif not isinstance(debug_print_header_analysis, bool):
                 debug_print_header_analysis = False
+            # 获取最大文件大小配置（默认5MB）
+            max_file_size_mb = credentials.get("max_file_size_mb")
+            if max_file_size_mb is not None:
+                try:
+                    max_file_size_mb = int(max_file_size_mb)
+                except (ValueError, TypeError):
+                    max_file_size_mb = 5  # 默认值
+            else:
+                max_file_size_mb = int(os.environ.get("MAX_FILE_SIZE_MB", "5"))
+            # 获取Excel处理超时配置（默认10秒）
+            excel_processing_timeout = credentials.get("excel_processing_timeout")
+            if excel_processing_timeout is not None:
+                try:
+                    excel_processing_timeout = int(excel_processing_timeout)
+                except (ValueError, TypeError):
+                    excel_processing_timeout = 10  # 默认值
+            else:
+                excel_processing_timeout = int(os.environ.get("EXCEL_PROCESSING_TIMEOUT", "10"))
         else:
             llm_api_key = os.environ.get("EXCEL_LLM_API_KEY")
             llm_base_url = os.environ.get("EXCEL_LLM_BASE_URL", "https://api.openai.com/v1/chat/completions")
@@ -326,6 +344,10 @@ class DifyPluginDataAnalyzerTool(Tool):
             debug_print_execution_output = os.environ.get("DEBUG_PRINT_EXECUTION_OUTPUT", "true").lower() in ("true", "1", "yes", "on")
             # 获取表头分析调试配置（从环境变量，默认禁用）
             debug_print_header_analysis = os.environ.get("DEBUG_PRINT_HEADER_ANALYSIS", "false").lower() in ("true", "1", "yes", "on")
+            # 获取最大文件大小配置（从环境变量，默认5MB）
+            max_file_size_mb = int(os.environ.get("MAX_FILE_SIZE_MB", "5"))
+            # 获取Excel处理超时配置（从环境变量，默认10秒）
+            excel_processing_timeout = int(os.environ.get("EXCEL_PROCESSING_TIMEOUT", "10"))
         
         # 验证必选配置
         if not analysis_api_url:
@@ -473,6 +495,8 @@ class DifyPluginDataAnalyzerTool(Tool):
                 analysis_timeout=analysis_timeout,  # 分析超时时间
                 debug_print_execution_output=debug_print_execution_output,  # 调试：是否打印代码执行结果
                 debug_print_header_analysis=debug_print_header_analysis,  # 调试：是否打印表头分析LLM响应
+                max_file_size_mb=max_file_size_mb,  # 最大文件大小（MB）
+                excel_processing_timeout=excel_processing_timeout,  # Excel处理超时时间（秒）
             ):
                 # 流式输出每个块
                 yield self.create_stream_variable_message('stream_output', chunk)

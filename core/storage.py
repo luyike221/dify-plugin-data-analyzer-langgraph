@@ -51,15 +51,28 @@ class Storage:
             return None
 
     def delete_file(self, file_id: str) -> bool:
-        """Delete a file record"""
+        """Delete a file record
+        
+        优化：将文件删除操作移出锁外，避免大文件删除时长时间持有锁
+        """
+        # 在锁内获取文件路径并删除记录
+        filepath = None
         with self._lock:
             if file_id in self.files:
                 filepath = self.files[file_id].get("filepath")
-                if filepath and os.path.exists(filepath):
-                    os.remove(filepath)
                 del self.files[file_id]
-                return True
-            return False
+            else:
+                return False
+        
+        # 在锁外执行文件删除操作（可能很慢）
+        if filepath and os.path.exists(filepath):
+            try:
+                os.remove(filepath)
+            except Exception as e:
+                # 文件删除失败不影响记录删除
+                print(f"Warning: Failed to delete file {filepath}: {e}")
+        
+        return True
 
     def list_files(self, purpose: Optional[str] = None) -> List[FileObject]:
         """List files with optional purpose filter"""
@@ -76,7 +89,12 @@ class Storage:
         file_ids: Optional[List[str]] = None,
         tool_resources: Optional[Dict] = None
     ) -> ThreadObject:
-        """Create a thread record"""
+        """Create a thread record
+        
+        优化：将文件操作移出锁外，避免大文件复制时长时间持有全局锁
+        这样可以允许其他请求并发处理，不会因为一个大文件而阻塞所有请求
+        """
+        # 先在锁内创建thread记录（快速操作）
         with self._lock:
             thread_id = f"thread-{uuid.uuid4().hex[:24]}"
             now = int(time.time())
@@ -91,22 +109,27 @@ class Storage:
             }
             self.threads[thread_id] = thread
             self.messages[thread_id] = []
-
-            # Create workspace for this thread
-            workspace_dir = get_thread_workspace(thread_id)
-            os.makedirs(workspace_dir, exist_ok=True)
-            os.makedirs(os.path.join(workspace_dir, "generated"), exist_ok=True)
-
-            # Copy files to thread workspace
+            
+            # 在锁内读取文件数据（快速操作）
+            files_to_copy = []
             for fid in (file_ids or []):
                 if fid in self.files:
-                    file_data = self.files[fid]
-                    src_path = file_data.get("filepath")
-                    if src_path and os.path.exists(src_path):
-                        dst_path = uniquify_path(Path(workspace_dir) / file_data["filename"])
-                        shutil.copy2(src_path, dst_path)
+                    file_data = self.files[fid].copy()  # 复制数据，避免在锁外访问
+                    files_to_copy.append(file_data)
+        
+        # 在锁外执行文件操作（这些操作可能很慢，特别是大文件）
+        workspace_dir = get_thread_workspace(thread_id)
+        os.makedirs(workspace_dir, exist_ok=True)
+        os.makedirs(os.path.join(workspace_dir, "generated"), exist_ok=True)
 
-            return ThreadObject(**thread)
+        # 文件复制操作移到锁外，避免长时间持有锁
+        for file_data in files_to_copy:
+            src_path = file_data.get("filepath")
+            if src_path and os.path.exists(src_path):
+                dst_path = uniquify_path(Path(workspace_dir) / file_data["filename"])
+                shutil.copy2(src_path, dst_path)
+
+        return ThreadObject(**thread)
 
     def get_thread(self, thread_id: str) -> Optional[ThreadObject]:
         """Get a thread record"""
@@ -118,18 +141,30 @@ class Storage:
             return None
 
     def delete_thread(self, thread_id: str) -> bool:
-        """Delete a thread record"""
+        """Delete a thread record
+        
+        优化：将工作空间删除操作移出锁外，避免大目录删除时长时间持有锁
+        """
+        # 在锁内删除记录
+        workspace_dir = None
         with self._lock:
             if thread_id in self.threads:
+                workspace_dir = get_thread_workspace(thread_id)
                 del self.threads[thread_id]
                 if thread_id in self.messages:
                     del self.messages[thread_id]
-                # Clean up workspace
-                workspace_dir = get_thread_workspace(thread_id)
-                if os.path.exists(workspace_dir):
-                    shutil.rmtree(workspace_dir)
-                return True
-            return False
+            else:
+                return False
+        
+        # 在锁外执行工作空间删除操作（可能很慢，特别是包含大文件时）
+        if workspace_dir and os.path.exists(workspace_dir):
+            try:
+                shutil.rmtree(workspace_dir)
+            except Exception as e:
+                # 工作空间删除失败不影响记录删除
+                print(f"Warning: Failed to delete workspace {workspace_dir}: {e}")
+        
+        return True
 
     def create_message(
         self,
