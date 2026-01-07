@@ -240,7 +240,7 @@ print("   - 总销售额与线上/线下销售额存在验证差异")
 ```python
 # 计算缺失率
 missing_rate = df['2131'].isnull().sum() / len(df) * 100
-print(f"2131列缺失率: {missing_rate:.1f}%")
+print(f"2131列缺失率: {{missing_rate:.1f}}%")
 
 # 检查数值型字段缺失值
 numeric_cols = df.select_dtypes(include=['number']).columns
@@ -300,7 +300,7 @@ print("结果")
        growth_rate = df['增长率(%)'].iloc[0]  # 假设是20
        # 正确：1000 * 20 / 100 = 200
        result = base_value * growth_rate / 100
-       print(f"增长率: {growth_rate}%，计算结果: {result}")
+       print(f"增长率: {{growth_rate}}%，计算结果: {{result}}")
        # ❌ 错误：result = base_value * growth_rate  # 错误！应该是 1000 * 20 / 100，而不是 1000 * 20
    
    # 示例2：占比(%) - 必须除以100
@@ -309,15 +309,15 @@ print("结果")
        ratio = df['占比(%)'].iloc[0]  # 假设是30
        # 正确：1000 * 30 / 100 = 300
        part = total * ratio / 100
-       print(f"占比: {ratio}%，计算结果: {part}")
+       print(f"占比: {{ratio}}%，计算结果: {{part}}")
    
    # 示例3：收入(万元) - 转换为元时需要乘以10000
    if '收入(万元)' in df.columns:
        income_wan = df['收入(万元)'].sum()  # 假设是100万元
-       print(f"总收入: {income_wan:.2f} 万元")
+       print(f"总收入: {{income_wan:.2f}} 万元")
        # 如果需要转换为元
        income_yuan = income_wan * 10000
-       print(f"总收入（元）: {income_yuan:.2f} 元")
+       print(f"总收入（元）: {{income_yuan:.2f}} 元")
    ```
 
 4. **单位处理原则**：
@@ -377,16 +377,16 @@ print("结果")
       growth_rate = df['增长率(%)'].iloc[0]  # 假设是20
       # ✅ 正确：1000 * 20 / 100 = 200
       result = base_value * growth_rate / 100
-      print(f"增长率: {growth_rate}%，计算结果: {result}")
+      print(f"增长率: {{growth_rate}}%，计算结果: {{result}}")
       # ❌ 错误：result = base_value * growth_rate  # 错误！应该是 1000 * 20 / 100，而不是 1000 * 20
       
   # 示例2：收入(万元) - 转换为元时需要乘以10000
   if '收入(万元)' in df.columns:
       income_wan = df['收入(万元)'].sum()  # 假设是100万元
-      print(f"总收入: {income_wan:.2f} 万元")
+      print(f"总收入: {{income_wan:.2f}} 万元")
       # 如果需要转换为元
       income_yuan = income_wan * 10000
-      print(f"总收入（元）: {income_yuan:.2f} 元")
+      print(f"总收入（元）: {{income_yuan:.2f}} 元")
   ```
 """
 
@@ -480,6 +480,10 @@ print("结果")
 
 {user_prompt}
 
+## 表头结构信息
+
+{column_metadata_info}
+
 ## 执行的分析代码
 
 ```python
@@ -492,7 +496,7 @@ print("结果")
 {execution_output}
 ```
 
-请根据以上信息，撰写一份完整的数据分析报告。
+请根据以上信息，撰写一份完整的数据分析报告。在报告中，可以参考表头结构信息来更好地理解数据的层次结构和字段含义。
 """
 
     # ========================================
@@ -642,10 +646,40 @@ print("结果")
         user_prompt: str,
         code: str,
         execution_output: str,
+        column_names: List[str] = None,
+        column_metadata: Dict[str, Any] = None,
     ) -> List[Dict[str, str]]:
         """格式化报告生成 Prompt"""
+        # 格式化列元数据信息
+        if column_metadata and isinstance(column_metadata, dict):
+            metadata_lines = []
+            for col_name, metadata in column_metadata.items():
+                if isinstance(metadata, dict):
+                    # 提取层级信息（level1-level5）
+                    levels = []
+                    for i in range(1, 6):
+                        level_key = f"level{i}"
+                        if level_key in metadata and metadata[level_key]:
+                            levels.append(metadata[level_key])
+                    
+                    if levels:
+                        level_str = " > ".join(levels)
+                        metadata_lines.append(f"- **{col_name}**: {level_str}")
+                    else:
+                        metadata_lines.append(f"- **{col_name}**: {metadata}")
+                else:
+                    metadata_lines.append(f"- **{col_name}**: {metadata}")
+            
+            column_metadata_info = "\n".join(metadata_lines) if metadata_lines else "无表头结构信息"
+        elif column_names:
+            # 如果没有元数据，至少显示列名
+            column_metadata_info = "列名列表：\n" + "\n".join([f"- {col}" for col in column_names])
+        else:
+            column_metadata_info = "无表头结构信息"
+        
         user_content = cls.REPORT_GENERATION_USER.format(
             user_prompt=user_prompt,
+            column_metadata_info=column_metadata_info,
             code=code,
             execution_output=execution_output,
         )

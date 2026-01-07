@@ -71,6 +71,7 @@ class AnalysisState(TypedDict, total=False):
         api_key: LLM API 密钥
         model: 模型名称
         temperature: 生成温度
+        debug_print_execution_output: 是否在流式输出中打印代码执行结果（用于调试）
         
         # === 工作流状态 ===
         phase: 当前阶段
@@ -112,6 +113,7 @@ class AnalysisState(TypedDict, total=False):
     api_key: Optional[str]
     model: str
     temperature: float
+    debug_print_execution_output: bool  # 是否在流式输出中打印代码执行结果（用于调试）
     
     # === 工作流状态 ===
     phase: str
@@ -157,6 +159,7 @@ def create_initial_state(
     api_key: Optional[str] = None,
     temperature: float = 0.4,
     request_id: Optional[str] = None,  # 新增：请求唯一标识
+    debug_print_execution_output: bool = False,  # 是否在流式输出中打印代码执行结果
 ) -> AnalysisState:
     """
     创建初始分析状态
@@ -204,6 +207,7 @@ def create_initial_state(
         api_key=api_key,
         model=model,
         temperature=temperature,
+        debug_print_execution_output=debug_print_execution_output,
         
         # 工作流状态
         phase=AnalysisPhase.INIT.value,

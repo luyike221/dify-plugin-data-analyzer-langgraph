@@ -192,6 +192,34 @@ credentials_schema:
       pt_BR: "Tempo limite para estágio de análise (análise de dados AI com geração e execução de código). Padrão: 360 segundos"
       ja_JP: "分析段階のタイムアウト（AIデータ分析とコード生成実行）。デフォルト：360秒"
     default: 360
+  - name: "debug_print_execution_output"
+    type: "boolean"
+    required: false
+    label:
+      en_US: "Debug: Print Code Execution Output"
+      zh_Hans: "调试：打印代码执行结果"
+      pt_BR: "Depuração: Imprimir Saída de Execução de Código"
+      ja_JP: "デバッグ：コード実行結果を出力"
+    help:
+      en_US: "If enabled, code execution output will be printed in the stream for debugging purposes. Default: enabled"
+      zh_Hans: "如果启用，代码执行结果将在流式输出中打印，用于调试。默认：启用"
+      pt_BR: "Se habilitado, a saída da execução do código será impressa no fluxo para fins de depuração. Padrão: habilitado"
+      ja_JP: "有効にすると、デバッグ目的でコード実行結果がストリームに出力されます。デフォルト：有効"
+    default: true
+  - name: "debug_print_header_analysis"
+    type: "boolean"
+    required: false
+    label:
+      en_US: "Debug: Print Header Analysis LLM Response"
+      zh_Hans: "调试：打印表头分析LLM响应"
+      pt_BR: "Depuração: Imprimir Resposta LLM de Análise de Cabeçalho"
+      ja_JP: "デバッグ：ヘッダー分析LLM応答を出力"
+    help:
+      en_US: "If enabled, the LLM response for header analysis will be printed in the stream for debugging purposes. Default: disabled"
+      zh_Hans: "如果启用，表头分析的LLM响应将在流式输出中打印，用于调试。默认：禁用"
+      pt_BR: "Se habilitado, a resposta LLM para análise de cabeçalho será impressa no fluxo para fins de depuração. Padrão: desabilitado"
+      ja_JP: "有効にすると、デバッグ目的でヘッダー分析のLLM応答がストリームに出力されます。デフォルト：無効"
+    default: false
 
 #########################################################################################
 # If you want to support OAuth, you can uncomment the following code.

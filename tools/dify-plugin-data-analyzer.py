@@ -299,6 +299,18 @@ class DifyPluginDataAnalyzerTool(Tool):
                 analysis_timeout = int(analysis_timeout)
             else:
                 analysis_timeout = int(os.environ.get("ANALYSIS_TIMEOUT", "360"))
+            # 获取调试配置（默认启用）
+            debug_print_execution_output = credentials.get("debug_print_execution_output", True)
+            if isinstance(debug_print_execution_output, str):
+                debug_print_execution_output = debug_print_execution_output.lower() in ("true", "1", "yes", "on")
+            elif not isinstance(debug_print_execution_output, bool):
+                debug_print_execution_output = True
+            # 获取表头分析调试配置（默认禁用）
+            debug_print_header_analysis = credentials.get("debug_print_header_analysis", False)
+            if isinstance(debug_print_header_analysis, str):
+                debug_print_header_analysis = debug_print_header_analysis.lower() in ("true", "1", "yes", "on")
+            elif not isinstance(debug_print_header_analysis, bool):
+                debug_print_header_analysis = False
         else:
             llm_api_key = os.environ.get("EXCEL_LLM_API_KEY")
             llm_base_url = os.environ.get("EXCEL_LLM_BASE_URL", "https://api.openai.com/v1/chat/completions")
@@ -310,6 +322,10 @@ class DifyPluginDataAnalyzerTool(Tool):
             # 获取超时配置（从环境变量，默认值）
             preprocessing_timeout = int(os.environ.get("PREPROCESSING_TIMEOUT", "90"))
             analysis_timeout = int(os.environ.get("ANALYSIS_TIMEOUT", "360"))
+            # 获取调试配置（从环境变量，默认启用）
+            debug_print_execution_output = os.environ.get("DEBUG_PRINT_EXECUTION_OUTPUT", "true").lower() in ("true", "1", "yes", "on")
+            # 获取表头分析调试配置（从环境变量，默认禁用）
+            debug_print_header_analysis = os.environ.get("DEBUG_PRINT_HEADER_ANALYSIS", "false").lower() in ("true", "1", "yes", "on")
         
         # 验证必选配置
         if not analysis_api_url:
@@ -455,6 +471,8 @@ class DifyPluginDataAnalyzerTool(Tool):
                 analyzer_type=analyzer_type,  # 分析器类型：langgraph 或 legacy
                 preprocessing_timeout=preprocessing_timeout,  # 预处理超时时间
                 analysis_timeout=analysis_timeout,  # 分析超时时间
+                debug_print_execution_output=debug_print_execution_output,  # 调试：是否打印代码执行结果
+                debug_print_header_analysis=debug_print_header_analysis,  # 调试：是否打印表头分析LLM响应
             ):
                 # 流式输出每个块
                 yield self.create_stream_variable_message('stream_output', chunk)

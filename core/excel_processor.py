@@ -40,6 +40,7 @@ class HeaderAnalysis:
     data_start_row: int     # 数据开始行（1-indexed）
     confidence: str         # 置信度: high/medium/low
     reason: str             # 分析原因说明
+    start_col: int = 1      # 数据起始列（1-indexed），第一个表头行中第一个非空表头开始的列
     valid_cols: Optional[List[int]] = None  # 有效列的索引列表（1-indexed），None表示所有列都有效
     
     def to_dict(self) -> Dict[str, Any]:
@@ -61,6 +62,7 @@ class ExcelProcessResult:
     column_metadata: Dict[str, Dict]        # 列结构元数据
     row_count: int                          # 数据行数
     error_message: Optional[str]            # 错误信息
+    llm_analysis_response: Optional[str] = None  # LLM分析原始响应（用于调试）
     
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -196,7 +198,7 @@ class SmartHeaderProcessor:
                          llm_api_key: Optional[str] = None,
                          llm_base_url: Optional[str] = None,
                          llm_model: Optional[str] = None,
-                         timeout: Optional[int] = None) -> HeaderAnalysis:
+                         timeout: Optional[int] = None) -> Tuple[HeaderAnalysis, str]:
         """
         使用LLM直接分析Excel表格的行和列结构
         
@@ -207,7 +209,7 @@ class SmartHeaderProcessor:
             timeout: 超时时间（秒），默认90秒
         
         返回:
-            分析结果（如果LLM调用失败，抛出异常）
+            (分析结果, LLM原始响应)（如果LLM调用失败，抛出异常）
         """
         preview_data = self.get_preview_data(max_rows=20, max_cols=15)
         merged_info = self.get_merged_info()
@@ -225,7 +227,7 @@ class SmartHeaderProcessor:
         # 解析LLM分析结果
         analysis = self._parse_llm_analysis_response(result)
         
-        return analysis
+        return analysis, result
     
     def validate_with_llm(self, rule_analysis: HeaderAnalysis, 
                          llm_api_key: Optional[str] = None,
@@ -273,7 +275,7 @@ class SmartHeaderProcessor:
             f"  - {m['range']}: '{m['value']}'" for m in merged_info[:10]
         )
         
-        prompt = f"""请分析以下Excel表格的结构，识别表头、数据行和有效列。
+        prompt = f"""请分析以下Excel表格的结构，识别表头和数据起始行。
 
 【表格预览】（前20行，[数值:xxx]表示数值类型）
 {table_str}
@@ -289,9 +291,10 @@ class SmartHeaderProcessor:
     "header_rows": <表头占用的行数（1表示单表头，>1表示多级表头）>,
     "header_type": "<single或multi>",
     "data_start_row": <数据开始行号（1-indexed）>,
-    "valid_cols": [<有效列的索引列表，1-indexed，例如[1,2,3,5,6]表示第1,2,3,5,6列有效，其他列无效>],
+    "start_col": <数据起始列号（1-indexed），第一个表头行中第一个非空表头开始的列。例如前两列为空，从第3列开始，则start_col=3>,
+    "valid_cols": null,
     "confidence": "<high/medium/low>",
-    "reason": "<分析说明：说明如何识别表头、数据行和有效列>"
+    "reason": "<分析说明：说明如何识别表头、数据起始行和起始列>"
 }}
 
 分析要点：
@@ -300,17 +303,15 @@ class SmartHeaderProcessor:
    - 单表头：只有一行表头
    - 多级表头：有多行表头（注意合并单元格可能表示多级表头）
    - 表头通常包含列名、分类标签等文本信息
-3. **数据起始行**：识别数据内容开始的行（通常包含数值数据）
-4. **有效列识别**：
-   - 表头区域完全为空且数据区域完全为空或无数值的列应标记为无效
-   - 如果列索引不在valid_cols中，表示该列无效，应被过滤
-   - 如果所有列都有效，valid_cols应为null或包含所有列索引
+3. **数据起始行**：识别数据内容开始的行（通常包含数值数据），这是最重要的信息
+4. **数据起始列**：识别第一个表头行中第一个非空表头开始的列号。如果前几列为空（如第1、2列为空），应从第3列开始，则start_col=3
 5. **合并单元格**：注意合并单元格可能影响表头行数的判断
 
 重要：
 - 行号和列号都从1开始计数
-- valid_cols必须是列索引的数组（1-indexed），例如[1,2,3,5,6]表示保留第1,2,3,5,6列
-- 如果所有列都有效，valid_cols可以设为null或包含所有列索引[1,2,3,...,{max_col}]
+- start_col 是第一个表头行中第一个非空表头开始的列号，如果所有列都有表头，则start_col=1
+- valid_cols 应始终设为 null（不需要分析有效列，保留所有列）
+- 重点关注数据起始行和起始列的识别
 - 只返回JSON，不要其他内容"""
         
         return prompt
@@ -567,12 +568,18 @@ class SmartHeaderProcessor:
             else:
                 valid_cols = None
             
+            # 解析起始列（默认为1）
+            start_col = int(data.get('start_col', 1))
+            if start_col < 1:
+                start_col = 1
+            
             # 构建HeaderAnalysis对象
             analysis = HeaderAnalysis(
                 skip_rows=int(data.get('skip_rows', 0)),
                 header_rows=int(data.get('header_rows', 1)),
                 header_type=data.get('header_type', 'single'),
                 data_start_row=int(data.get('data_start_row', 1)),
+                start_col=start_col,
                 confidence=data.get('confidence', 'medium'),
                 reason=f"LLM分析: {data.get('reason', '')}",
                 valid_cols=valid_cols
@@ -583,7 +590,7 @@ class SmartHeaderProcessor:
             logger.info(f"  - 表头行数: {analysis.header_rows}")
             logger.info(f"  - 表头类型: {analysis.header_type}")
             logger.info(f"  - 数据起始行: {analysis.data_start_row}")
-            logger.info(f"  - 有效列数: {len(analysis.valid_cols) if analysis.valid_cols else '全部'}")
+            logger.info(f"  - 数据起始列: {analysis.start_col}")
             logger.info(f"  - 置信度: {analysis.confidence}")
             
             return analysis
@@ -623,6 +630,7 @@ class SmartHeaderProcessor:
                     header_rows=rule_analysis.header_rows,
                     header_type=rule_analysis.header_type,
                     data_start_row=rule_analysis.data_start_row,
+                    start_col=rule_analysis.start_col,  # 保持原有的起始列
                     confidence=data.get('confidence', 'high'),  # LLM验证通过，置信度提升
                     reason=f"规则分析+LLM验证: {data.get('reason', '验证通过')}",
                     valid_cols=rule_analysis.valid_cols  # 保持原有的列过滤结果
@@ -635,6 +643,7 @@ class SmartHeaderProcessor:
                     header_rows=suggestions.get('header_rows', rule_analysis.header_rows),
                     header_type=suggestions.get('header_type', rule_analysis.header_type),
                     data_start_row=suggestions.get('data_start_row', rule_analysis.data_start_row),
+                    start_col=suggestions.get('start_col', rule_analysis.start_col),  # 保持或使用建议的起始列
                     confidence=data.get('confidence', 'medium'),
                     reason=f"规则分析+LLM修正: {data.get('reason', 'LLM建议修正')}",
                     valid_cols=rule_analysis.valid_cols  # 保持原有的列过滤结果
@@ -762,8 +771,13 @@ class SmartHeaderProcessor:
         header_start = analysis.skip_rows + 1
         header_end = analysis.skip_rows + analysis.header_rows
         
-        # 确定要处理的列（如果指定了有效列，只处理有效列）
-        cols_to_process = analysis.valid_cols if analysis.valid_cols is not None else list(range(1, max_col + 1))
+        # 确定要处理的列：从 start_col 开始，如果指定了有效列，则取交集
+        all_cols = list(range(analysis.start_col, max_col + 1))
+        if analysis.valid_cols is not None:
+            # 取交集：从 start_col 开始，且在 valid_cols 中的列
+            cols_to_process = [col for col in all_cols if col in analysis.valid_cols]
+        else:
+            cols_to_process = all_cols
         
         logger.info(f"📋 提取表头: 处理 {len(cols_to_process)} 列")
         
@@ -840,7 +854,7 @@ class SmartHeaderProcessor:
                     llm_api_key: Optional[str] = None,
                     llm_base_url: Optional[str] = None,
                     llm_model: Optional[str] = None,
-                    preprocessing_timeout: Optional[int] = None) -> Tuple[pd.DataFrame, HeaderAnalysis, Dict[str, Dict]]:
+                    preprocessing_timeout: Optional[int] = None) -> Tuple[pd.DataFrame, HeaderAnalysis, Dict[str, Dict], Optional[str]]:
         """
         转换为DataFrame
         
@@ -853,8 +867,9 @@ class SmartHeaderProcessor:
             preprocessing_timeout: 预处理超时时间（秒），默认90秒
         
         返回:
-            (DataFrame, 分析结果, 列结构元数据)
+            (DataFrame, 分析结果, 列结构元数据, LLM原始响应)
         """
+        llm_response = None
         if analysis is None:
             # 必须使用LLM进行分析（同时分析行和列）
             logger.info("🤖 开始使用LLM分析Excel表格结构（行和列）...")
@@ -865,20 +880,28 @@ class SmartHeaderProcessor:
                 raise ValueError("LLM API密钥未配置，无法进行Excel分析。请配置EXCEL_LLM_API_KEY或传入llm_api_key参数")
             
             # 使用LLM直接分析（包含行和列信息）
-            analysis = self.analyze_with_llm(
+            analysis, llm_response = self.analyze_with_llm(
                 llm_api_key=llm_api_key,
                 llm_base_url=llm_base_url,
                 llm_model=llm_model,
                 timeout=preprocessing_timeout
             )
             logger.info("✅ LLM分析完成（已包含行和列信息）")
+            # 保存LLM响应到实例变量，以便后续使用
+            self._llm_analysis_response = llm_response
         
         headers, column_metadata = self.extract_headers(analysis)
         
-        # 确定要读取的列（如果指定了有效列，只读取有效列）
-        cols_to_read = analysis.valid_cols if analysis.valid_cols is not None else list(range(1, self.ws.max_column + 1))
+        # 确定要读取的列：从 start_col 开始，如果指定了有效列，则取交集
+        max_col = self.ws.max_column
+        all_cols = list(range(analysis.start_col, max_col + 1))
+        if analysis.valid_cols is not None:
+            # 取交集：从 start_col 开始，且在 valid_cols 中的列
+            cols_to_read = [col for col in all_cols if col in analysis.valid_cols]
+        else:
+            cols_to_read = all_cols
         
-        logger.info(f"📊 读取数据: 从 {len(cols_to_read)} 列读取数据")
+        logger.info(f"📊 读取数据: 从第 {analysis.start_col} 列开始，共 {len(cols_to_read)} 列")
         
         # 读取数据
         data = []
@@ -929,7 +952,7 @@ class SmartHeaderProcessor:
         
         logger.info(f"✅ DataFrame 创建完成: {len(df)} 行 x {len(df.columns)} 列")
         logger.info(f"📊 数据类型优化完成")
-        return df, analysis, column_metadata
+        return df, analysis, column_metadata, llm_response
     
     def close(self):
         """关闭工作簿并清理临时文件"""
@@ -984,7 +1007,7 @@ def process_excel_file(
         
         # 处理Excel（现在总是使用LLM分析）
         processor = SmartHeaderProcessor(filepath, sheet_name)
-        df, analysis, column_metadata = processor.to_dataframe(
+        df, analysis, column_metadata, llm_response = processor.to_dataframe(
             use_llm_validate=True,  # 总是使用LLM，忽略传入的use_llm_validate参数
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
@@ -1041,7 +1064,8 @@ def process_excel_file(
             column_names=list(df.columns),
             column_metadata=column_metadata,
             row_count=len(df),
-            error_message=None
+            error_message=None,
+            llm_analysis_response=llm_response
         )
         
     except Exception as e:

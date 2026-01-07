@@ -350,12 +350,14 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
         )
         logger.warning(f"⚠️ [Node] 用户输入与数据无关: {clarification_msg}")
         _push_to_request_queue(request_id, f"\n\n⚠️ **需要澄清**\n\n{clarification_msg}\n\n")
+        # 注意：澄清消息已经在节点执行时通过队列实时推送过了
+        # stream_output 保留为空，避免重复推送
         return {
             "phase": AnalysisPhase.USER_CLARIFICATION_NEEDED.value,
             "needs_clarification": True,
             "clarification_message": clarification_msg,
             "intent_analysis_result": response,
-            "stream_output": [f"\n⚠️ **需要澄清**\n\n{clarification_msg}\n\n"],
+            "stream_output": [],  # 避免重复推送
         }
     
     if needs_clarification:
@@ -366,12 +368,14 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
         )
         logger.info(f"ℹ️ [Node] 需要用户澄清: {clarification_msg}")
         _push_to_request_queue(request_id, f"\n\n❓ **需要澄清**\n\n{clarification_msg}\n\n")
+        # 注意：澄清消息已经在节点执行时通过队列实时推送过了
+        # stream_output 保留为空，避免重复推送
         return {
             "phase": AnalysisPhase.USER_CLARIFICATION_NEEDED.value,
             "needs_clarification": True,
             "clarification_message": clarification_msg,
             "intent_analysis_result": response,
-            "stream_output": [f"\n❓ **需要澄清**\n\n{clarification_msg}\n\n"],
+            "stream_output": [],  # 避免重复推送
         }
     
     # 可以继续分析
@@ -602,8 +606,16 @@ plt.rcParams['axes.unicode_minus'] = False
             except Exception as e:
                 logger.warning(f"⚠️ 检查并复制CSV文件时出错: {e}")
         
-        # 输出提示信息，不显示具体执行结果
-        _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在生成分析报告...**\n\n")
+        # 根据配置决定是否输出执行结果
+        debug_print = state.get("debug_print_execution_output", False)
+        if debug_print:
+            _push_to_request_queue(request_id, "\n✅ **代码执行完毕**\n\n")
+            _push_to_request_queue(request_id, "📊 **执行结果：**\n\n")
+            _push_to_request_queue(request_id, f"```\n{output}\n```\n\n")
+            _push_to_request_queue(request_id, "正在生成分析报告...\n\n")
+        else:
+            # 默认不显示具体执行结果
+            _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在生成分析报告...**\n\n")
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "current_output": output,
@@ -742,11 +754,13 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
         code = last_execution.code
         output = last_execution.output
     
-    # 构建报告 prompt
+    # 构建报告 prompt（包含表头元数据）
     messages = PromptTemplates.format_report_generation_prompt(
         user_prompt=state["user_prompt"],
         code=code,
         execution_output=output,
+        column_names=state.get("column_names", []),
+        column_metadata=state.get("column_metadata", {}),
     )
     
     # 收集流式输出的列表（用于后续格式化）
@@ -756,6 +770,8 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
         """流式输出回调，收集 token（同时会通过队列实时传递）"""
         stream_chunks.append(chunk)
     
+    # 先输出标题（实时传递）
+    _push_to_request_queue(request_id, "\n📄 **正在生成分析报告...**\n\n")
     
     # 流式调用 LLM 生成报告（每个 token 会通过队列实时传递）
     report = call_llm(
@@ -1012,6 +1028,7 @@ class DataAnalysisGraph:
         api_key: Optional[str] = None,
         temperature: float = 0.4,
         analysis_timeout: Optional[int] = None,
+        debug_print_execution_output: bool = False,
     ) -> Generator[str, None, AnalysisResult]:
         """
         执行数据分析（流式输出）
@@ -1052,6 +1069,7 @@ class DataAnalysisGraph:
                 api_key=api_key,
                 temperature=temperature,
                 request_id=request_id,  # 传递请求ID
+                debug_print_execution_output=debug_print_execution_output,  # 传递调试配置
             )
             
             # 在后台线程中执行工作流

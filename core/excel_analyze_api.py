@@ -1044,6 +1044,8 @@ def analyze_excel_stream(
     analyzer_type: Optional[str] = None,  # 新增：分析器类型参数
     preprocessing_timeout: Optional[int] = None,  # 预处理超时时间（秒）
     analysis_timeout: Optional[int] = None,  # 分析超时时间（秒）
+    debug_print_execution_output: bool = False,  # 是否在流式输出中打印代码执行结果（用于调试）
+    debug_print_header_analysis: bool = False,  # 是否在流式输出中打印表头分析LLM响应（用于调试）
 ) -> Generator[str, None, None]:
     """
     Excel智能分析函数 - 流式版本
@@ -1094,6 +1096,8 @@ def analyze_excel_stream(
             analysis_api_key=analysis_api_key,
             preprocessing_timeout=preprocessing_timeout,
             analysis_timeout=analysis_timeout,
+            debug_print_execution_output=debug_print_execution_output,
+            debug_print_header_analysis=debug_print_header_analysis,
         )
         return
     
@@ -1156,14 +1160,18 @@ def analyze_excel_stream(
             yield f"- **表头行数**: {ha.header_rows} 行\n"
             yield f"- **表头类型**: {'多级表头' if ha.header_type == 'multi' else '单表头'}\n"
             yield f"- **数据起始行**: 第 {ha.data_start_row} 行\n"
-            if ha.valid_cols:
-                yield f"- **有效列数**: {len(ha.valid_cols)} 列（已过滤无效列）\n"
-            else:
-                yield f"- **有效列数**: 全部列\n"
+            yield f"- **数据起始列**: 第 {ha.start_col} 列（第一个表头行中第一个非空表头开始的列）\n"
             yield f"- **置信度**: {ha.confidence}\n"
             if ha.reason:
                 yield f"- **分析说明**: {ha.reason}\n"
             yield "\n"
+            
+            # 根据调试开关决定是否输出LLM原始响应
+            if debug_print_header_analysis and process_result.llm_analysis_response:
+                yield "\n📋 **LLM表头分析原始响应（调试信息）：**\n\n"
+                yield "```json\n"
+                yield process_result.llm_analysis_response
+                yield "\n```\n\n"
         
     except Exception as e:
         yield f"❌ 表头分析失败: {str(e)}\n"
