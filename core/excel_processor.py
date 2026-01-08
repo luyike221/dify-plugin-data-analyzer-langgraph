@@ -82,24 +82,32 @@ class ExcelProcessResult:
 class SmartHeaderProcessor:
     """智能表头处理器"""
     
-    def __init__(self, filepath: str, sheet_name: str = None):
+    def __init__(self, filepath: str, sheet_name: str = None, load_timeout: int = 60):
+        """
+        初始化智能表头处理器
+        
+        参数:
+            filepath: Excel文件路径
+            sheet_name: 工作表名称（可选）
+            load_timeout: 加载Excel文件的超时时间（秒），默认60秒
+        """
         self.filepath = filepath
         self.sheet_name = sheet_name
         self.file_ext = Path(filepath).suffix.lower()
         self._temp_xlsx_path = None  # 用于存储临时转换的 .xlsx 文件路径
         
-        # 如果是 .xls 格式，先转换为 .xlsx
+        # 如果是 .xls 格式，先转换为 .xlsx（带超时保护）
         if self.file_ext == '.xls':
             logger.info(f"🔄 检测到 .xls 格式文件，正在转换为 .xlsx...")
-            self._temp_xlsx_path = self._convert_xls_to_xlsx(filepath)
+            self._temp_xlsx_path = self._convert_xls_to_xlsx(filepath, timeout=load_timeout)
             actual_filepath = self._temp_xlsx_path
             logger.info(f"✅ 转换完成: {self._temp_xlsx_path}")
         else:
             actual_filepath = filepath
         
-        # 统一使用 openpyxl 读取
+        # 统一使用 openpyxl 读取（带超时保护）
         # 注意：不使用 read_only 模式，因为需要访问 merged_cells 属性来处理合并单元格
-        self.wb = load_workbook(actual_filepath, data_only=True)
+        self.wb = self._load_workbook_with_timeout(actual_filepath, timeout=load_timeout)
         # 修复：明确使用第一个工作表，而不是依赖 wb.active（active可能是用户最后查看的工作表）
         if sheet_name:
             self.ws = self.wb[sheet_name]
@@ -110,41 +118,89 @@ class SmartHeaderProcessor:
             self.ws = self.wb[self.wb.sheetnames[0]]
         self.merged_cells_map = self._build_merged_cells_map()
     
-    def _convert_xls_to_xlsx(self, xls_path: str) -> str:
+    def _load_workbook_with_timeout(self, filepath: str, timeout: int = 60):
+        """带超时保护的 load_workbook"""
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+        
+        def _load():
+            """在后台线程中加载工作簿"""
+            try:
+                return load_workbook(filepath, data_only=True)
+            except Exception as e:
+                logger.error(f"加载Excel文件失败: {filepath}, 错误: {e}")
+                raise
+        
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_load)
+                try:
+                    wb = future.result(timeout=timeout)
+                    return wb
+                except FutureTimeoutError:
+                    logger.error(f"加载Excel文件超时: {filepath} (超时时间: {timeout}秒)")
+                    future.cancel()
+                    raise TimeoutError(f"加载Excel文件超时（{timeout}秒）: {filepath}")
+        except Exception as e:
+            if isinstance(e, TimeoutError):
+                raise
+            logger.error(f"加载Excel文件时发生异常: {filepath}, 错误: {e}")
+            raise
+    
+    def _convert_xls_to_xlsx(self, xls_path: str, timeout: int = 60) -> str:
         """
-        将 .xls 文件转换为 .xlsx 格式
+        将 .xls 文件转换为 .xlsx 格式（带超时保护）
         
         参数:
             xls_path: .xls 文件路径
+            timeout: 超时时间（秒），默认60秒
         
         返回:
             临时 .xlsx 文件路径
         """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+        
+        def _convert():
+            """在后台线程中执行转换"""
+            try:
+                # 读取所有工作表
+                excel_file = pd.ExcelFile(xls_path, engine='xlrd')
+                
+                # 创建临时文件
+                temp_dir = os.path.dirname(xls_path)
+                temp_xlsx_path = os.path.join(
+                    temp_dir, 
+                    f"{Path(xls_path).stem}_converted_{os.getpid()}.xlsx"
+                )
+                
+                # 使用 ExcelWriter 写入所有工作表
+                with pd.ExcelWriter(temp_xlsx_path, engine='openpyxl') as writer:
+                    for sheet_name in excel_file.sheet_names:
+                        df = pd.read_excel(excel_file, sheet_name=sheet_name, engine='xlrd')
+                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                
+                logger.info(f"✅ .xls 文件已转换为 .xlsx: {temp_xlsx_path}")
+                return temp_xlsx_path
+            except Exception as e:
+                logger.error(f"❌ 转换 .xls 文件失败: {e}")
+                raise ValueError(
+                    f"无法转换 .xls 文件。请确保已安装 xlrd 库: pip install xlrd。错误: {str(e)}"
+                )
+        
         try:
-            # 读取所有工作表
-            excel_file = pd.ExcelFile(xls_path, engine='xlrd')
-            
-            # 创建临时文件
-            temp_dir = os.path.dirname(xls_path)
-            temp_xlsx_path = os.path.join(
-                temp_dir, 
-                f"{Path(xls_path).stem}_converted_{os.getpid()}.xlsx"
-            )
-            
-            # 使用 ExcelWriter 写入所有工作表
-            with pd.ExcelWriter(temp_xlsx_path, engine='openpyxl') as writer:
-                for sheet_name in excel_file.sheet_names:
-                    df = pd.read_excel(excel_file, sheet_name=sheet_name, engine='xlrd')
-                    df.to_excel(writer, sheet_name=sheet_name, index=False)
-            
-            logger.info(f"✅ .xls 文件已转换为 .xlsx: {temp_xlsx_path}")
-            return temp_xlsx_path
-            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_convert)
+                try:
+                    result = future.result(timeout=timeout)
+                    return result
+                except FutureTimeoutError:
+                    logger.error(f"转换 .xls 文件超时: {xls_path} (超时时间: {timeout}秒)")
+                    future.cancel()
+                    raise TimeoutError(f"转换 .xls 文件超时（{timeout}秒）: {xls_path}")
         except Exception as e:
-            logger.error(f"❌ 转换 .xls 文件失败: {e}")
-            raise ValueError(
-                f"无法转换 .xls 文件。请确保已安装 xlrd 库: pip install xlrd。错误: {str(e)}"
-            )
+            if isinstance(e, TimeoutError):
+                raise
+            logger.error(f"转换 .xls 文件时发生异常: {xls_path}, 错误: {e}")
+            raise
     
     def _build_merged_cells_map(self) -> Dict[Tuple[int, int], str]:
         """构建合并单元格映射"""
@@ -1368,6 +1424,34 @@ class SmartHeaderProcessor:
                 logger.warning(f"⚠️ 删除临时文件失败: {self._temp_xlsx_path}, 错误: {e}")
 
 
+def _save_csv_with_timeout(df: pd.DataFrame, csv_path: str, timeout: int = 30) -> None:
+    """带超时保护的保存CSV文件"""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+    
+    def _save():
+        """在后台线程中保存CSV"""
+        try:
+            df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        except Exception as e:
+            logger.error(f"保存CSV文件失败: {csv_path}, 错误: {e}")
+            raise
+    
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_save)
+            try:
+                future.result(timeout=timeout)
+            except FutureTimeoutError:
+                logger.error(f"保存CSV文件超时: {csv_path} (超时时间: {timeout}秒)")
+                future.cancel()
+                raise TimeoutError(f"保存CSV文件超时（{timeout}秒）: {csv_path}")
+    except Exception as e:
+        if isinstance(e, TimeoutError):
+            raise
+        logger.error(f"保存CSV文件时发生异常: {csv_path}, 错误: {e}")
+        raise
+
+
 def process_excel_file(
     filepath: str,
     output_dir: str,
@@ -1393,7 +1477,7 @@ def process_excel_file(
         llm_base_url: LLM API地址（可选）
         llm_model: LLM模型名称（可选）
         preprocessing_timeout: 预处理超时时间（秒），默认90秒
-        excel_processing_timeout: Excel处理超时时间（秒），在LLM分析之前，默认10秒
+        excel_processing_timeout: Excel加载超时时间（秒），默认60秒
     
     返回:
         ExcelProcessResult
@@ -1405,19 +1489,18 @@ def process_excel_file(
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
         
-        # 记录开始时间，用于超时检查
-        start_time = time.time()
-        excel_processing_timeout_seconds = excel_processing_timeout if excel_processing_timeout is not None else 10
+        # 设置超时时间
+        excel_processing_timeout_seconds = excel_processing_timeout if excel_processing_timeout is not None else 60
+        # Excel 加载超时时间（用于 SmartHeaderProcessor.__init__）
+        load_timeout = excel_processing_timeout_seconds
         
         # 处理Excel（现在总是使用LLM分析）
-        processor = SmartHeaderProcessor(filepath, sheet_name)
-        
-        # 检查是否超时（在LLM分析之前）
-        elapsed_time = time.time() - start_time
-        if elapsed_time > excel_processing_timeout_seconds:
-            processor.close()
-            error_msg = "Excel内容过多或格式太复杂，解析失败"
-            logger.error(f"❌ Excel处理超时: 耗时 {elapsed_time:.2f}秒，超过限制 {excel_processing_timeout_seconds}秒")
+        # 注意：SmartHeaderProcessor.__init__ 内部已经有超时保护，如果超时会抛出 TimeoutError
+        try:
+            processor = SmartHeaderProcessor(filepath, sheet_name, load_timeout=load_timeout)
+        except TimeoutError as e:
+            error_msg = f"Excel文件加载超时: {str(e)}"
+            logger.error(f"❌ {error_msg}")
             return ExcelProcessResult(
                 success=False,
                 header_analysis=None,
@@ -1443,9 +1526,13 @@ def process_excel_file(
             base_name = Path(filepath).stem
             output_filename = f"{base_name}_processed"
         
-        # 保存CSV
+        # 保存CSV（带超时保护）
         csv_path = os.path.join(output_dir, f"{output_filename}.csv")
-        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        try:
+            _save_csv_with_timeout(df, csv_path, timeout=30)
+        except TimeoutError as e:
+            logger.error(f"保存CSV文件超时: {csv_path}")
+            raise ValueError(f"保存CSV文件超时: {str(e)}")
         
         # 提取字段值样本（分组聚合后的常见值）
         logger.info("📊 提取字段值样本...")
@@ -1505,14 +1592,44 @@ def process_excel_file(
         )
 
 
-def get_sheet_names(filepath: str) -> List[str]:
-    """获取Excel文件的所有工作表名称"""
+def get_sheet_names(filepath: str, timeout: int = 10) -> List[str]:
+    """获取Excel文件的所有工作表名称（带超时保护）
+    
+    Args:
+        filepath: Excel文件路径
+        timeout: 超时时间（秒），默认10秒
+    
+    Returns:
+        工作表名称列表，如果超时或出错则返回空列表
+    """
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+    
+    def _load_sheets():
+        """在后台线程中加载工作表名称"""
+        try:
+            wb = load_workbook(filepath)
+            sheets = wb.sheetnames
+            wb.close()
+            return sheets
+        except Exception as e:
+            logger.warning(f"读取Excel工作表失败: {filepath}, 错误: {e}")
+            return []
+    
     try:
-        wb = load_workbook(filepath)
-        sheets = wb.sheetnames
-        wb.close()
-        return sheets
+        # 使用线程池执行，带超时保护
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_load_sheets)
+            try:
+                sheets = future.result(timeout=timeout)
+                return sheets if sheets else []
+            except FutureTimeoutError:
+                logger.error(f"获取Excel工作表名称超时: {filepath} (超时时间: {timeout}秒)")
+                # 尝试取消任务（但可能已经执行了）
+                future.cancel()
+                return []
     except Exception as e:
+        logger.error(f"获取Excel工作表名称时发生异常: {filepath}, 错误: {e}")
         return []
 
 

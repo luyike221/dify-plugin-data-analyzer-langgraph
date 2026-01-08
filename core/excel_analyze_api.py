@@ -147,29 +147,12 @@ def get_or_create_thread(thread_id: Optional[str]) -> tuple:
             # 会话不存在，创建新会话并使用传入的thread_id
             logger.info(f"会话 {thread_id} 不存在，创建新会话并使用该ID")
             
-            # 手动创建会话记录（因为storage.create_thread会自动生成ID）
-            now = int(time.time())
-            
-            # 创建会话数据
-            thread_data = {
-                "id": thread_id,
-                "object": "thread",
-                "created_at": now,
-                "last_accessed_at": now,
-                "metadata": {"type": "excel_analysis", "dify_conversation_id": thread_id},
-                "file_ids": [],
-                "tool_resources": None,
-            }
-            
-            # 添加到storage
-            with storage._lock:
-                storage.threads[thread_id] = thread_data
-                storage.messages[thread_id] = []
-            
-            # 创建工作空间
+            # 使用线程安全的方法创建指定ID的会话
+            thread = storage.create_thread_with_id(
+                thread_id=thread_id,
+                metadata={"type": "excel_analysis", "dify_conversation_id": thread_id}
+            )
             workspace_dir = get_thread_workspace(thread_id)
-            os.makedirs(workspace_dir, exist_ok=True)
-            os.makedirs(os.path.join(workspace_dir, "generated"), exist_ok=True)
             
             return thread_id, workspace_dir, True  # True表示新建
     else:
@@ -552,16 +535,14 @@ async def analyze_excel(
                 stream=False
             )
         
-        # 更新会话元数据
-        if current_thread_id in storage.threads:
-            excel_files = storage.threads[current_thread_id].get("metadata", {}).get("excel_files", [])
-            excel_files.append({
-                "original_name": filename,
-                "processed_name": os.path.basename(process_result.processed_file_path) if process_result.processed_file_path else None,
-                "sheet_name": sheet_name,
-                "timestamp": int(time.time())
-            })
-            storage.threads[current_thread_id]["metadata"]["excel_files"] = excel_files
+        # 更新会话元数据（线程安全）
+        excel_file_info = {
+            "original_name": filename,
+            "processed_name": os.path.basename(process_result.processed_file_path) if process_result.processed_file_path else None,
+            "sheet_name": sheet_name,
+            "timestamp": int(time.time())
+        }
+        storage.append_thread_metadata_list(current_thread_id, "excel_files", excel_file_info)
         
         return {
             "thread_id": current_thread_id,
@@ -599,7 +580,8 @@ async def get_excel_sheets(file_id: str) -> Dict[str, Any]:
     if not file_obj:
         raise ValueError(f"文件 {file_id} 不存在")
     
-    filepath = storage.files[file_id].get("filepath")
+    # 使用线程安全的方法获取文件路径
+    filepath = storage.get_file_path(file_id)
     if not filepath or not os.path.exists(filepath):
         raise ValueError("文件不存在")
     
@@ -1225,17 +1207,15 @@ def analyze_excel_stream(
     else:
         yield "ℹ️ 已跳过自动分析（auto_analysis=False）\n"
     
-    # 更新会话元数据（静默处理）
+    # 更新会话元数据（静默处理，线程安全）
     try:
-        if current_thread_id in storage.threads:
-            excel_files = storage.threads[current_thread_id].get("metadata", {}).get("excel_files", [])
-            excel_files.append({
-                "original_name": filename,
-                "processed_name": os.path.basename(process_result.processed_file_path) if process_result.processed_file_path else None,
-                "sheet_name": sheet_name,
-                "timestamp": int(time.time())
-            })
-            storage.threads[current_thread_id]["metadata"]["excel_files"] = excel_files
+        excel_file_info = {
+            "original_name": filename,
+            "processed_name": os.path.basename(process_result.processed_file_path) if process_result.processed_file_path else None,
+            "sheet_name": sheet_name,
+            "timestamp": int(time.time())
+        }
+        storage.append_thread_metadata_list(current_thread_id, "excel_files", excel_file_info)
     except Exception:
         pass  # 忽略元数据更新错误
 
