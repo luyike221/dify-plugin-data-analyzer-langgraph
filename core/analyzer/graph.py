@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 # 使用字典存储每个请求的独立队列，避免全局队列被多个请求共享导致的竞态条件
 _request_queues: Dict[str, queue.Queue] = {}
 _queues_lock = threading.Lock()
+# 队列状态标记：记录消费方是否断开连接
+_queue_disconnected: Dict[str, bool] = {}
 
 
 def _create_request_queue(request_id: str) -> queue.Queue:
@@ -36,6 +38,7 @@ def _create_request_queue(request_id: str) -> queue.Queue:
     with _queues_lock:
         q = queue.Queue(maxsize=1000)
         _request_queues[request_id] = q
+        _queue_disconnected[request_id] = False  # 初始化为未断开
         logger.debug(f"🔧 创建请求队列: {request_id}")
         return q
 
@@ -58,13 +61,62 @@ def _remove_request_queue(request_id: str):
                 except queue.Empty:
                     break
             del _request_queues[request_id]
-            logger.debug(f"🧹 移除请求队列: {request_id}")
+        # 移除断开标记
+        if request_id in _queue_disconnected:
+            del _queue_disconnected[request_id]
+        logger.debug(f"🧹 移除请求队列: {request_id}")
+
+
+def _mark_queue_disconnected(request_id: str):
+    """标记队列的消费方已断开连接"""
+    with _queues_lock:
+        _queue_disconnected[request_id] = True
+        logger.warning(f"⚠️ 标记队列 {request_id} 为已断开，将停止推送数据")
+
+
+def _is_queue_disconnected(request_id: str) -> bool:
+    """检查队列的消费方是否已断开连接"""
+    with _queues_lock:
+        return _queue_disconnected.get(request_id, False)
 
 
 def _push_to_request_queue(request_id: str, chunk: Optional[str]):
-    """推送到指定请求的队列（chunk 为 None 表示结束标记）"""
+    """推送到指定请求的队列（chunk 为 None 表示结束标记）
+    
+    如果消费方已断开或队列接近满，将停止推送以避免资源浪费
+    """
+    # 检查消费方是否已断开
+    if _is_queue_disconnected(request_id):
+        # 结束标记仍然推送，以便后台线程知道可以结束
+        if chunk is None:
+            # 结束标记仍然尝试推送（使用非阻塞方式）
+            q = _get_request_queue(request_id)
+            if q is not None:
+                try:
+                    q.put_nowait(chunk)
+                except queue.Full:
+                    pass
+        # 非结束标记直接返回，不推送
+        return
+    
     q = _get_request_queue(request_id)
     if q is not None:
+        # 检查队列大小，如果接近满（>90%），停止推送非关键数据
+        queue_size = q.qsize()
+        queue_maxsize = q.maxsize
+        if queue_size > queue_maxsize * 0.9:
+            # 队列接近满，只推送结束标记，其他数据跳过
+            if chunk is None:
+                # 结束标记仍然尝试推送
+                try:
+                    q.put_nowait(chunk)
+                except queue.Full:
+                    pass
+            else:
+                # 非结束标记跳过，避免队列满
+                logger.warning(f"⚠️ 请求 {request_id} 的队列接近满 ({queue_size}/{queue_maxsize})，跳过 chunk")
+            return
+        
         try:
             q.put(chunk, timeout=0.1)
         except queue.Full:
@@ -159,18 +211,39 @@ def call_llm(
                 )
         
         full_content = ""
-        for chunk in response:
-            if chunk.choices and chunk.choices[0].delta.content:
-                delta = chunk.choices[0].delta.content
-                full_content += delta
-                
-                # 实时回调（如果提供）
-                if stream_callback:
-                    stream_callback(delta)
-                
-                # 推送到请求独立的队列（如果启用且提供了 request_id）
-                if push_to_queue and request_id:
-                    _push_to_request_queue(request_id, delta)
+        try:
+            for chunk in response:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    delta = chunk.choices[0].delta.content
+                    full_content += delta
+                    
+                    # 实时回调（如果提供）
+                    if stream_callback:
+                        stream_callback(delta)
+                    
+                    # 推送到请求独立的队列（如果启用且提供了 request_id）
+                    if push_to_queue and request_id:
+                        _push_to_request_queue(request_id, delta)
+        except Exception as e:
+            # 检查是否是超时错误
+            error_type_name = type(e).__name__
+            error_str = str(e).lower()
+            is_timeout_error = (
+                'timeout' in error_type_name.lower() or 
+                'timeout' in error_str or 
+                'timed out' in error_str or
+                ('httpcore' in str(type(e).__module__) and 'timeout' in error_type_name.lower()) or
+                ('httpx' in str(type(e).__module__) and 'timeout' in error_type_name.lower())
+            )
+            
+            if is_timeout_error:
+                # 超时错误：只记录警告，不输出完整堆栈
+                logger.warning(f"⏰ LLM调用超时 (request_id={request_id}): {error_type_name} - {str(e)}")
+            else:
+                # 其他错误：正常记录
+                logger.error(f"❌ LLM调用出错 (request_id={request_id}): {e}", exc_info=True)
+            # 重新抛出异常，让上层处理
+            raise
         
         return full_content
     else:
@@ -1235,7 +1308,28 @@ class DataAnalysisGraph:
                             final_state = node_output
                 except Exception as e:
                     execution_error[0] = e
-                    logger.error(f"❌ 工作流执行出错 (request_id={request_id}): {e}", exc_info=True)
+                    # 检查是否是超时错误（ReadTimeout, ConnectTimeout等）
+                    is_timeout_error = False
+                    error_type_name = type(e).__name__
+                    error_str = str(e).lower()
+                    
+                    # 检查错误类型名称
+                    if 'timeout' in error_type_name.lower():
+                        is_timeout_error = True
+                    # 检查错误消息
+                    elif 'timeout' in error_str or 'timed out' in error_str:
+                        is_timeout_error = True
+                    # 检查是否是 httpcore 或 httpx 的超时错误
+                    elif 'httpcore' in str(type(e).__module__) or 'httpx' in str(type(e).__module__):
+                        if 'timeout' in error_type_name.lower() or 'timeout' in error_str:
+                            is_timeout_error = True
+                    
+                    if is_timeout_error:
+                        # 超时错误：只记录简单信息，不输出完整堆栈
+                        logger.warning(f"⏰ 工作流执行超时 (request_id={request_id}): {error_type_name} - {str(e)}")
+                    else:
+                        # 其他错误：正常记录完整堆栈
+                        logger.error(f"❌ 工作流执行出错 (request_id={request_id}): {e}", exc_info=True)
                 finally:
                     execution_done.set()
                     # 发送结束标记到该请求的队列
@@ -1246,6 +1340,7 @@ class DataAnalysisGraph:
             graph_thread.start()
             
             # 实时从该请求的队列中读取并 yield token
+            consumer_disconnected = False
             while True:
                 try:
                     # 从该请求的队列中获取 token（超时0.1秒，避免阻塞太久）
@@ -1255,8 +1350,15 @@ class DataAnalysisGraph:
                     if chunk is None:
                         break
                     
-                    # 实时 yield token
-                    yield chunk
+                    # 实时 yield token（捕获连接断开异常）
+                    try:
+                        yield chunk
+                    except Exception as e:
+                        # 捕获 yield 异常（通常是连接断开）
+                        logger.warning(f"⚠️ [DEBUG] yield 时连接断开 (request_id={request_id}): {e}")
+                        consumer_disconnected = True
+                        _mark_queue_disconnected(request_id)
+                        break
                     
                 except queue.Empty:
                     # 检查工作流是否已完成
@@ -1267,7 +1369,14 @@ class DataAnalysisGraph:
                                 chunk = request_queue.get_nowait()
                                 if chunk is None:
                                     break
-                                yield chunk
+                                try:
+                                    yield chunk
+                                except Exception as e:
+                                    # 捕获 yield 异常（通常是连接断开）
+                                    logger.warning(f"⚠️ [DEBUG] yield 时连接断开 (request_id={request_id}): {e}")
+                                    consumer_disconnected = True
+                                    _mark_queue_disconnected(request_id)
+                                    break
                             except queue.Empty:
                                 break
                         break

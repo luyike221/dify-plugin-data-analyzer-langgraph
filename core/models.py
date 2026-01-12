@@ -167,7 +167,7 @@ class ExcelAnalyzeRequest(BaseModel):
     sheet_name: Optional[str] = Field(None, description="工作表名称")
     auto_analysis: bool = Field(True, description="是否自动进行数据分析")
     analysis_prompt: Optional[str] = Field(None, description="自定义分析提示词")
-    stream: bool = Field(False, description="是否流式返回分析结果")
+    stream: bool = Field(True, description="是否流式返回分析结果（默认启用）")
 
 
 class ExcelAnalyzeResponse(BaseModel):

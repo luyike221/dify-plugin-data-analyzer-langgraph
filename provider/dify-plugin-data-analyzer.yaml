@@ -219,7 +219,7 @@ credentials_schema:
       zh_Hans: "如果启用，表头分析的LLM响应将在流式输出中打印，用于调试。默认：禁用"
       pt_BR: "Se habilitado, a resposta LLM para análise de cabeçalho será impressa no fluxo para fins de depuração. Padrão: desabilitado"
       ja_JP: "有効にすると、デバッグ目的でヘッダー分析のLLM応答がストリームに出力されます。デフォルト：無効"
-    default: false
+    default: true
   - name: "max_file_size_mb"
     type: "text-input"
     required: false
@@ -229,16 +229,16 @@ credentials_schema:
       pt_BR: "Tamanho Máximo do Arquivo (MB)"
       ja_JP: "最大ファイルサイズ（MB）"
     placeholder:
-      en_US: "5"
-      zh_Hans: "5"
-      pt_BR: "5"
-      ja_JP: "5"
+      en_US: "45"
+      zh_Hans: "45"
+      pt_BR: "45"
+      ja_JP: "45"
     help:
-      en_US: "Maximum allowed Excel file size in MB. Files larger than this will be rejected. Default: 5 MB"
-      zh_Hans: "允许的最大Excel文件大小（MB）。超过此大小的文件将被拒绝。默认：5 MB"
-      pt_BR: "Tamanho máximo permitido do arquivo Excel em MB. Arquivos maiores que isso serão rejeitados. Padrão: 5 MB"
-      ja_JP: "許可される最大Excelファイルサイズ（MB）。このサイズを超えるファイルは拒否されます。デフォルト：5 MB"
-    default: 5
+      en_US: "Maximum allowed Excel file size in MB. Files larger than this will be rejected. Default: 45 MB"
+      zh_Hans: "允许的最大Excel文件大小（MB）。超过此大小的文件将被拒绝。默认：45 MB"
+      pt_BR: "Tamanho máximo permitido do arquivo Excel em MB. Arquivos maiores que isso serão rejeitados. Padrão: 45 MB"
+      ja_JP: "許可される最大Excelファイルサイズ（MB）。このサイズを超えるファイルは拒否されます。デフォルト：45 MB"
+    default: 45
   - name: "excel_processing_timeout"
     type: "text-input"
     required: false
@@ -258,6 +258,25 @@ credentials_schema:
       pt_BR: "Tempo limite para processamento de arquivo Excel (leitura e análise do arquivo, antes da análise LLM). Se excedido, mostrará 'Conteúdo Excel muito grande ou formato muito complexo, análise falhou'. Padrão: 10 segundos"
       ja_JP: "Excelファイル処理のタイムアウト（ファイル読み込みと解析、LLM分析の前）。超過した場合、「Excelコンテンツが多すぎるか、形式が複雑すぎて、解析に失敗しました」と表示されます。デフォルト：10秒"
     default: 10
+  - name: "max_rows"
+    type: "text-input"
+    required: false
+    label:
+      en_US: "Maximum Rows"
+      zh_Hans: "最大行数"
+      pt_BR: "Número Máximo de Linhas"
+      ja_JP: "最大行数"
+    placeholder:
+      en_US: "10000"
+      zh_Hans: "10000"
+      pt_BR: "10000"
+      ja_JP: "10000"
+    help:
+      en_US: "Maximum allowed number of rows in Excel file. Files with more rows will be rejected. Default: 10000 rows"
+      zh_Hans: "允许的最大Excel文件行数。超过此行数的文件将被拒绝。默认：10000 行"
+      pt_BR: "Número máximo permitido de linhas no arquivo Excel. Arquivos com mais linhas serão rejeitados. Padrão: 10000 linhas"
+      ja_JP: "許可される最大Excelファイル行数。この行数を超えるファイルは拒否されます。デフォルト：10000行"
+    default: 10000
 
 #########################################################################################
 # If you want to support OAuth, you can uncomment the following code.

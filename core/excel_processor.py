@@ -12,11 +12,13 @@ import pandas as pd
 import json
 import re
 import os
+import sys
 import requests
 import logging
 import tempfile
 import shutil
 import time
+import zipfile
 from openpyxl import load_workbook
 from typing import Tuple, List, Dict, Optional, Any
 from collections import defaultdict
@@ -82,7 +84,7 @@ class ExcelProcessResult:
 class SmartHeaderProcessor:
     """智能表头处理器"""
     
-    def __init__(self, filepath: str, sheet_name: str = None, load_timeout: int = 60):
+    def __init__(self, filepath: str, sheet_name: str = None, load_timeout: int = 60, read_timeout: int = 10, debug_print_header_analysis: bool = False, max_file_size_mb: Optional[int] = None, max_rows: Optional[int] = None):
         """
         初始化智能表头处理器
         
@@ -90,11 +92,40 @@ class SmartHeaderProcessor:
             filepath: Excel文件路径
             sheet_name: 工作表名称（可选）
             load_timeout: 加载Excel文件的超时时间（秒），默认60秒
+            read_timeout: 读取Excel数据的超时时间（秒），默认10秒
+            debug_print_header_analysis: 是否流式打印原始数据（用于调试），默认False
+            max_file_size_mb: 最大文件大小（MB），如果为None则使用默认值
         """
         self.filepath = filepath
         self.sheet_name = sheet_name
         self.file_ext = Path(filepath).suffix.lower()
         self._temp_xlsx_path = None  # 用于存储临时转换的 .xlsx 文件路径
+        self.read_timeout = read_timeout  # 读取数据的超时时间
+        self.debug_print_header_analysis = debug_print_header_analysis  # 是否流式打印原始数据
+        
+        # 文件预检查（在加载之前）
+        logger.info(f"🔍 [DEBUG] SmartHeaderProcessor.__init__: 开始文件预检查")
+        try:
+            # 基础检查（文件存在、大小、可读）
+            _validate_excel_file_basic(filepath, max_file_size_mb=max_file_size_mb)
+            logger.info(f"✅ [DEBUG] SmartHeaderProcessor.__init__: 基础检查通过")
+            
+            # 如果是 .xlsx 格式，验证ZIP格式
+            if self.file_ext == '.xlsx':
+                _validate_xlsx_format(filepath, timeout=0.5)
+                logger.info(f"✅ [DEBUG] SmartHeaderProcessor.__init__: ZIP格式验证通过")
+                
+                # Excel结构验证（可选，较慢）
+                _validate_excel_structure(filepath, timeout=2.0)
+                logger.info(f"✅ [DEBUG] SmartHeaderProcessor.__init__: Excel结构验证通过")
+                
+                # 行数检查（超过配置的最大行数直接拒绝）
+                max_rows_value = max_rows if max_rows is not None else 10000
+                _validate_excel_row_count(filepath, sheet_name=sheet_name, max_rows=max_rows_value, timeout=5.0)
+                logger.info(f"✅ [DEBUG] SmartHeaderProcessor.__init__: 行数检查通过（限制: {max_rows_value} 行）")
+        except Exception as e:
+            logger.error(f"❌ [DEBUG] SmartHeaderProcessor.__init__: 文件预检查失败: {e}")
+            raise
         
         # 如果是 .xls 格式，先转换为 .xlsx（带超时保护）
         if self.file_ext == '.xls':
@@ -107,8 +138,11 @@ class SmartHeaderProcessor:
         
         # 统一使用 openpyxl 读取（带超时保护）
         # 注意：不使用 read_only 模式，因为需要访问 merged_cells 属性来处理合并单元格
+        logger.info(f"⏳ [DEBUG] SmartHeaderProcessor.__init__: 开始加载工作簿，超时: {load_timeout}秒")
         self.wb = self._load_workbook_with_timeout(actual_filepath, timeout=load_timeout)
+        logger.info(f"✅ [DEBUG] SmartHeaderProcessor.__init__: 工作簿加载完成")
         # 修复：明确使用第一个工作表，而不是依赖 wb.active（active可能是用户最后查看的工作表）
+        logger.info(f"⏳ [DEBUG] SmartHeaderProcessor.__init__: 开始选择工作表")
         if sheet_name:
             self.ws = self.wb[sheet_name]
         else:
@@ -116,7 +150,11 @@ class SmartHeaderProcessor:
             if not self.wb.sheetnames:
                 raise ValueError("Excel文件不包含任何工作表")
             self.ws = self.wb[self.wb.sheetnames[0]]
-        self.merged_cells_map = self._build_merged_cells_map()
+        logger.info(f"✅ [DEBUG] SmartHeaderProcessor.__init__: 工作表选择完成")
+        # 构建合并单元格映射（带超时保护）
+        logger.info(f"⏳ [DEBUG] SmartHeaderProcessor.__init__: 开始构建合并单元格映射，超时: {load_timeout}秒")
+        self.merged_cells_map = self._build_merged_cells_map_with_timeout(timeout=load_timeout)
+        logger.info(f"✅ [DEBUG] SmartHeaderProcessor.__init__: 合并单元格映射构建完成")
     
     def _load_workbook_with_timeout(self, filepath: str, timeout: int = 60):
         """带超时保护的 load_workbook"""
@@ -125,6 +163,16 @@ class SmartHeaderProcessor:
         def _load():
             """在后台线程中加载工作簿"""
             try:
+                # 二次验证（快速检查，因为可能已经在 __init__ 中检查过）
+                # 只做基础检查，不做ZIP验证（避免重复）
+                file_ext = Path(filepath).suffix.lower()
+                if file_ext == '.xlsx':
+                    # 快速ZIP头验证
+                    with open(filepath, 'rb') as f:
+                        header = f.read(4)
+                        if header != b'PK\x03\x04':
+                            raise ValueError(f"不是有效的Excel文件（ZIP格式错误）: {filepath}")
+                
                 return load_workbook(filepath, data_only=True)
             except Exception as e:
                 logger.error(f"加载Excel文件失败: {filepath}, 错误: {e}")
@@ -203,7 +251,7 @@ class SmartHeaderProcessor:
             raise
     
     def _build_merged_cells_map(self) -> Dict[Tuple[int, int], str]:
-        """构建合并单元格映射"""
+        """构建合并单元格映射（内部方法，不带超时）"""
         merged_map = {}
         try:
             for merged_range in self.ws.merged_cells.ranges:
@@ -218,130 +266,125 @@ class SmartHeaderProcessor:
         
         return merged_map
     
+    def _build_merged_cells_map_with_timeout(self, timeout: int = 10) -> Dict[Tuple[int, int], str]:
+        """带超时保护的构建合并单元格映射"""
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+        
+        def _build():
+            """在后台线程中构建合并单元格映射"""
+            try:
+                return self._build_merged_cells_map()
+            except Exception as e:
+                logger.error(f"构建合并单元格映射失败: {e}")
+                raise
+        
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_build)
+                try:
+                    merged_map = future.result(timeout=timeout)
+                    return merged_map
+                except FutureTimeoutError:
+                    logger.error(f"构建合并单元格映射超时: {self.filepath} (超时时间: {timeout}秒)")
+                    future.cancel()
+                    # 超时时返回空字典，而不是抛出异常，避免影响后续处理
+                    logger.warning(f"⚠️ 构建合并单元格映射超时，将使用空映射")
+                    return {}
+        except Exception as e:
+            # 如果发生其他异常，也返回空字典
+            logger.warning(f"⚠️ 构建合并单元格映射时发生异常: {e}，将使用空映射")
+            return {}
+    
     def get_cell_value(self, row: int, col: int) -> Any:
         """获取单元格值，处理合并单元格"""
         if (row, col) in self.merged_cells_map:
             return self.merged_cells_map[(row, col)]
         return self.ws.cell(row, col).value
     
-    def get_preview_data(self, max_rows: int = 30, max_cols: int = 20) -> List[List[Any]]:
+    def get_preview_data(self, max_rows: int = 15, max_cols: int = 25) -> List[List[Any]]:
         """
-        获取预览数据用于分析（增强版）
+        获取预览数据用于分析（简化版）
         
-        改进：
-        1. 增加预览行数和列数，更好地展示复杂表头
-        2. 标记合并单元格，便于识别层级结构
-        3. 区分文本和数值，便于识别数据起始行
+        直接读取原始数据，不做任何处理（包括合并单元格处理）
+        带超时保护
         """
-        actual_max_col = min(self.ws.max_column, max_cols)
-        actual_max_row = min(self.ws.max_row, max_rows)
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
         
-        data = []
-        for row in range(1, actual_max_row + 1):
-            row_data = []
-            for col in range(1, actual_max_col + 1):
-                value = self.get_cell_value(row, col)
-                
-                # 检查是否是合并单元格的左上角
-                is_merged_top_left = False
-                merge_marker = ""
-                try:
-                    for merged_range in self.ws.merged_cells.ranges:
-                        if merged_range.min_row == row and merged_range.min_col == col:
-                            is_merged_top_left = True
-                            # 标记合并范围
-                            row_span = merged_range.max_row - merged_range.min_row + 1
-                            col_span = merged_range.max_col - merged_range.min_col + 1
-                            if row_span > 1 or col_span > 1:
-                                merge_marker = f"[合并:行{row_span}列{col_span}]"
-                            break
-                except Exception:
-                    # 如果无法获取合并单元格信息，跳过标记
-                    pass
-                
-                # 转换为字符串便于分析
-                if value is None:
-                    # 检查是否在合并单元格内（但不是左上角）
-                    is_in_merged = (row, col) in self.merged_cells_map
-                    if is_in_merged and not is_merged_top_left:
-                        row_data.append("[合并内]")
-                    else:
-                        row_data.append("")
-                elif isinstance(value, (int, float)):
-                    row_data.append(f"[数值:{value}]")
-                else:
-                    value_str = str(value)[:40]  # 截断过长内容
-                    if is_merged_top_left and merge_marker:
-                        row_data.append(f"{value_str}{merge_marker}")
-                    else:
-                        row_data.append(value_str)
-            data.append(row_data)
-        return data
-    
-    def get_merged_info(self) -> List[Dict]:
-        """
-        获取合并单元格信息（增强版）
-        
-        改进：
-        1. 增加更多行数的合并单元格信息（前30行）
-        2. 区分行合并和列合并
-        3. 提供更详细的结构信息
-        """
-        merged_info = []
-        try:
-            for merged_range in self.ws.merged_cells.ranges:
-                if merged_range.min_row <= 30:  # 关注前30行，覆盖复杂表头
-                    row_span = merged_range.max_row - merged_range.min_row + 1
-                    col_span = merged_range.max_col - merged_range.min_col + 1
-                    value = self.ws.cell(merged_range.min_row, merged_range.min_col).value
-                    value_str = str(value)[:50] if value else ""
-                    
-                    merged_info.append({
-                        'range': str(merged_range),
-                        'rows': f"{merged_range.min_row}-{merged_range.max_row}",
-                        'cols': f"{merged_range.min_col}-{merged_range.max_col}",
-                        'row_span': row_span,
-                        'col_span': col_span,
-                        'value': value_str,
-                        'is_row_merge': row_span > 1,  # 是否跨行合并
-                        'is_col_merge': col_span > 1,  # 是否跨列合并
-                    })
+        def _read_data():
+            """在后台线程中读取数据"""
+            actual_max_col = min(self.ws.max_column, max_cols)
+            actual_max_row = min(self.ws.max_row, max_rows)
             
-            # 按行号排序，便于分析
-            merged_info.sort(key=lambda x: int(x['rows'].split('-')[0]))
-        except Exception as e:
-            # 如果无法获取合并单元格信息，记录警告并返回空列表
-            logger.warning(f"⚠️ 获取合并单元格信息时出错: {e}")
+            data = []
+            for row in range(1, actual_max_row + 1):
+                row_data = []
+                for col in range(1, actual_max_col + 1):
+                    # 直接读取原始值，不做任何处理
+                    value = self.ws.cell(row, col).value
+                    row_data.append(value)
+                data.append(row_data)
+            return data
         
-        return merged_info
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_read_data)
+                try:
+                    data = future.result(timeout=self.read_timeout)
+                    
+                    # 如果启用调试打印，流式打印原始数据
+                    if self.debug_print_header_analysis:
+                        print("=" * 80)
+                        print("【原始Excel数据 - 流式打印】（前15行，前25列）")
+                        print("=" * 80)
+                        sys.stdout.flush()
+                        
+                        for i, row in enumerate(data, 1):
+                            print(f"行{i}: {row}")
+                            sys.stdout.flush()
+                        
+                        print("=" * 80)
+                        sys.stdout.flush()
+                    
+                    return data
+                except FutureTimeoutError:
+                    logger.error(f"读取Excel数据超时: {self.filepath} (超时时间: {self.read_timeout}秒)")
+                    future.cancel()
+                    raise TimeoutError(f"读取Excel数据超时（{self.read_timeout}秒）: {self.filepath}")
+        except Exception as e:
+            if isinstance(e, TimeoutError):
+                raise
+            logger.error(f"读取Excel数据时发生异常: {self.filepath}, 错误: {e}")
+            raise
+    
     
     def analyze_with_llm(self, 
                          llm_api_key: Optional[str] = None,
                          llm_base_url: Optional[str] = None,
                          llm_model: Optional[str] = None,
-                         timeout: Optional[int] = None) -> Tuple[HeaderAnalysis, str]:
+                         timeout: Optional[int] = None,
+                         thinking_callback: Optional[callable] = None) -> Tuple[HeaderAnalysis, str]:
         """
-        使用LLM直接分析Excel表格的行和列结构
+        使用LLM直接分析Excel表格的行和列结构（简化版）
         
         参数:
             llm_api_key: LLM API密钥（可选）
             llm_base_url: LLM API地址（可选）
             llm_model: LLM模型名称（可选）
             timeout: 超时时间（秒），默认90秒
+            thinking_callback: 用于流式输出 thinking 内容的回调函数（可选）
         
         返回:
             (分析结果, LLM原始响应)（如果LLM调用失败，抛出异常）
         """
-        # 增加预览行数和列数，更好地展示复杂多级表头
-        preview_data = self.get_preview_data(max_rows=30, max_cols=20)
-        merged_info = self.get_merged_info()
+        # 直接读取前15行、25列的原始数据，不做任何处理
+        preview_data = self.get_preview_data(max_rows=15, max_cols=25)
         max_col = self.ws.max_column
         
-        # 构建分析提示词
-        prompt = self._build_llm_analysis_prompt(preview_data, merged_info, max_col)
+        # 构建简化的分析提示词
+        prompt = self._build_llm_analysis_prompt(preview_data, max_col)
         
         # 调用LLM（使用传入的配置或从全局配置读取）
-        result = self._call_llm(prompt, llm_api_key, llm_base_url, llm_model, timeout=timeout)
+        result = self._call_llm(prompt, llm_api_key, llm_base_url, llm_model, timeout=timeout, thinking_callback=thinking_callback)
         
         if not result:
             raise ValueError("LLM分析失败：无法获取LLM响应，请检查API配置")
@@ -370,10 +413,9 @@ class SmartHeaderProcessor:
             验证后的分析结果（如果LLM验证失败，返回原规则分析结果）
         """
         preview_data = self.get_preview_data()
-        merged_info = self.get_merged_info()
         
         # 构建验证提示词
-        prompt = self._build_validation_prompt(preview_data, merged_info, rule_analysis)
+        prompt = self._build_validation_prompt(preview_data, rule_analysis)
         
         # 调用LLM（使用传入的配置或从全局配置读取）
         result = self._call_llm(prompt, llm_api_key, llm_base_url, llm_model, timeout=timeout)
@@ -383,194 +425,58 @@ class SmartHeaderProcessor:
         
         return validated
     
-    def _build_llm_analysis_prompt(self, preview_data: List[List], merged_info: List[Dict], 
+    def _build_llm_analysis_prompt(self, preview_data: List[List], 
                                    max_col: int) -> str:
         """
-        构建LLM分析提示词（完全重构版）
+        构建LLM分析提示词（简化版）
         
-        采用分步骤方法识别复杂多级表头：
-        1. 先识别无效行
-        2. 再识别表头层级结构
-        3. 最后确定数据起始行
+        直接读取原始数据，不做任何处理，让LLM直接识别
         """
-        # 格式化预览数据为表格形式（显示更多列，并标记行特征）
-        num_cols_to_show = min(20, len(preview_data[0]) if preview_data else 20)
-        col_headers = " | ".join([f"列{i+1:2d}" for i in range(num_cols_to_show)])
-        table_str = f"行号 | {col_headers} | 行特征\n" + "-" * 140 + "\n"
+        # 格式化预览数据为简单的表格形式
+        num_cols = len(preview_data[0]) if preview_data else 0
+        num_rows = len(preview_data)
+        
+        # 构建简单的表格字符串
+        table_str = "【Excel原始数据】（前15行，前25列）\n\n"
+        table_str += "行号 | " + " | ".join([f"列{i+1}" for i in range(num_cols)]) + "\n"
+        table_str += "-" * (8 + num_cols * 15) + "\n"
         
         for i, row in enumerate(preview_data, 1):
-            row_str = " | ".join(str(cell)[:12] for cell in row[:num_cols_to_show])
-            
-            # 分析行的特征，便于识别无效行
-            non_empty_count = sum(1 for cell in row[:num_cols_to_show] if cell and str(cell).strip() and str(cell) != "[合并内]")
-            has_merge = any("[合并" in str(cell) for cell in row[:num_cols_to_show])
-            has_text_label = any(
-                cell and isinstance(cell, str) and 
-                (len(cell) > 2) and 
-                not cell.startswith("[数值") and 
-                not cell.startswith("[合并") and
-                not cell.startswith("[合并内")
-                for cell in row[:num_cols_to_show]
-            )
-            
-            # 标记行特征（便于识别无效行和表头行）
-            row_marker = ""
-            if non_empty_count <= 3 and not has_merge and not has_text_label:
-                row_marker = f"⚠️可能无效行（只有{non_empty_count}个非空单元格，无表头特征）"
-            elif has_merge:
-                row_marker = "✅表头行（包含合并单元格）"
-            elif has_text_label:
-                row_marker = "✅可能表头行（包含文本标签）"
-            elif non_empty_count > 5:
-                row_marker = "📊可能数据行（包含多个数值）"
-            
-            table_str += f"  {i:2d}  | {row_str} | {row_marker}\n"
+            row_str = " | ".join([str(cell) if cell is not None else "" for cell in row])
+            table_str += f"  {i:2d}  | {row_str}\n"
         
-        # 格式化合并单元格信息（按类型分类）
-        if merged_info:
-            # 按行合并和列合并分类
-            row_merges = [m for m in merged_info if m.get('is_row_merge', False)]
-            col_merges = [m for m in merged_info if m.get('is_col_merge', False)]
-            both_merges = [m for m in merged_info if m.get('is_row_merge', False) and m.get('is_col_merge', False)]
-            
-            merged_str = "【合并单元格详细信息】\n\n"
-            
-            if both_merges:
-                merged_str += "同时跨行跨列的合并单元格（通常是多级表头的关键标识）：\n"
-                for m in both_merges[:20]:
-                    merged_str += f"  - 行{m['rows']} 列{m['cols']} (跨{m['row_span']}行{m['col_span']}列): '{m['value']}'\n"
-                merged_str += "\n"
-            
-            if row_merges:
-                merged_str += "跨行合并单元格（表示表头的层级结构）：\n"
-                for m in row_merges[:20]:
-                    if not (m.get('is_row_merge') and m.get('is_col_merge')):
-                        merged_str += f"  - 行{m['rows']} (跨{m['row_span']}行): '{m['value']}'\n"
-                merged_str += "\n"
-            
-            if col_merges:
-                merged_str += "跨列合并单元格（表示列的分组）：\n"
-                for m in col_merges[:20]:
-                    if not (m.get('is_row_merge') and m.get('is_col_merge')):
-                        merged_str += f"  - 列{m['cols']} (跨{m['col_span']}列): '{m['value']}'\n"
-                merged_str += "\n"
-            
-            # 按行号汇总，便于识别表头范围
-            merged_str += "按行号汇总（便于识别表头范围）：\n"
-            row_merge_map = {}
-            for m in merged_info[:30]:
-                row_start = int(m['rows'].split('-')[0])
-                row_end = int(m['rows'].split('-')[1])
-                for r in range(row_start, row_end + 1):
-                    if r not in row_merge_map:
-                        row_merge_map[r] = []
-                    row_merge_map[r].append(f"'{m['value']}'")
-            
-            for row_num in sorted(row_merge_map.keys())[:30]:
-                merged_str += f"  行{row_num}: {', '.join(row_merge_map[row_num][:3])}\n"
-        else:
-            merged_str = "无合并单元格"
-        
-        prompt = f"""你是一个Excel表格结构分析专家。请使用分步骤方法分析以下复杂多级表头结构。
+        prompt = f"""你是一个Excel表格结构分析专家。请分析以下Excel表格的原始数据，识别表头结构。
 
-【表格预览】（前30行，[数值:xxx]表示数值类型，[合并:行X列Y]表示合并单元格，[合并内]表示合并单元格内部）
 {table_str}
-
-{merged_str}
 
 【总列数】{max_col}
 
 ## 分析任务
 
-请按照以下步骤分析表格结构，并返回JSON格式的结果。
+请分析表格结构，识别：
+1. **无效行（skip_rows）**：表头之前的无效行（如文档标题、说明文字、注释、公司名称、填报说明等）
+2. **表头行数（header_rows）**：所有表头行，包括多级表头的所有层级
+3. **表头类型（header_type）**：single（单表头）或 multi（多级表头）
+4. **数据起始行（data_start_row）**：数据开始的行号，必须等于 skip_rows + header_rows + 1
+5. **数据起始列（start_col）**：第一个表头行中第一个非空表头开始的列号
 
-## 步骤1：识别无效行（skip_rows）
+## 识别规则
 
-**目标**：找出表头**之前**的无效行（如文档标题、说明文字、注释、公司名称等）
+### 无效行特征：
+- 文档标题（如"2024年度报表"）
+- 公司名称或部门名称（如"XX公司"、"XX部门"）
+- 填报说明（如"填报机构"、"填报日期"、"填报机构/日期"等，任何包含"填报"关键词的行）
+- 只有数字没有标签的行（如只有"222"、"111"等数字，没有对应的列名）
+- 完全空行或只有少量文本的行
 
-**无效行的典型特征**：
-1. **只有少量非空单元格**（如只有1-3个单元格有值）
-2. **不包含表头特征**：
-   - 不包含列名（如"销售额"、"增长率"等）
-   - 不包含分类标签（如"销售事业部"、"华东大区"等）
-   - 不包含合并单元格（合并单元格通常是表头的标识）
-3. **内容类型**（这些都是无效行）：
-   - 文档标题（如"2024年度报表"、"场景业务统计表"）
-   - 公司名称或部门名称（如"XX公司"、"XX部门"、"卫栖梧额外企"）
-   - 说明文字或注释
-   - 只有数字没有标签的行（如只有"222"、"111"、"22"这样的数字，没有对应的列名或标签）
-   - 完全空行
-   - **填报说明文字**（必须识别为无效行）：
-     - "填报机构"、"填报日期"、"填报机构/日期"、"填报机构、日期"
-     - "填报单位"、"填报人"、"填报时间"
-     - 任何包含"填报"关键词的行
-     - 格式如"（填报机构/日期）"、"填报机构：XX"等
+### 表头行特征：
+- 包含列名或分类标签（如"销售事业部"、"华东大区"、"线上销售额"等）
+- 有明确的层级结构（多级表头）
+- 通常不包含大量数值数据
 
-**表头行的典型特征**（用于区分）：
-1. **包含列名或分类标签**（如"销售事业部"、"线上销售额"等）
-2. **包含合并单元格**（合并单元格是表头的重要标识）
-3. **有明确的层级结构**（如大区、省份、城市、指标等）
-4. **跨越多列**（表头通常跨越多列，而不是只有1-2个单元格）
-
-**判断步骤**：
-1. **从第1行开始向下检查**
-2. **如果某行符合无效行特征**，继续检查下一行
-3. **如果某行符合表头行特征**（特别是包含合并单元格或分类标签），则这行是表头开始
-4. **skip_rows = 表头开始行号 - 1**
-
-**示例**：
-- 第1行：只有数字"222"、"111"（无标签） → 无效行
-- 第2行：空行或只有少量文本 → 无效行
-- 第3行：公司名称"XX公司"或"卫栖梧额外企" → 无效行
-- 第4行：填报说明"填报机构/日期"或"（填报机构/日期）" → **无效行**（必须识别）
-- 第5行：包含"销售事业部"和合并单元格 → **这是表头开始！**
-- **结果**：skip_rows=4（前4行都是无效行，包括填报说明行）
-
-**注意**：表头行不能算作无效行！如果第1行就包含表头特征（如合并单元格、分类标签），则 skip_rows=0
-
-## 步骤2：识别表头层级结构（header_rows）
-
-**目标**：找出所有表头行，包括多级表头的所有层级
-
-**判断标准**：
-1. **表头行的特征**：
-   - 包含列名、分类标签、分组信息等文本内容
-   - 可能包含合并单元格（合并单元格是表头的重要标识）
-   - 通常不包含大量数值数据
-
-2. **合并单元格的处理（关键）**：
-   - **合并单元格跨越的所有行都是表头的一部分**
-   - 例如：如果合并单元格覆盖行1-3，则行1、行2、行3都是表头
-   - 即使某些行看起来"空"（值只在合并区域左上角），这些行仍然是表头
-   - 查看【合并单元格详细信息】，找出所有被合并单元格覆盖的行
-
-3. **多级表头识别**：
-   - 第1层：可能有跨多行的大分类（如"销售事业部"）
-   - 第2层：可能有跨多行的中分类（如"华东大区"）
-   - 第3层：可能有跨多行的小分类（如"江苏省"）
-   - 第4层：具体的列名（如"线上销售额"）
-   - **所有层级的行都要计入 header_rows**
-
-4. **识别方法**：
-   - 从【合并单元格按行号汇总】中，找出所有包含合并单元格的行
-   - 这些行通常都是表头的一部分
-   - 继续向下查找，直到找到第一行包含大量数值数据的行（这是数据行）
-
-## 步骤3：确定数据起始行（data_start_row）
-
-**计算公式**：data_start_row = skip_rows + header_rows + 1
-
-**验证方法**：
-- 数据行通常包含大量数值数据（标记为[数值:xxx]）
-- 数据行不再是表头文本或分类标签
-
-## 步骤4：确定数据起始列（start_col）
-
-**目标**：找出第一个表头行中第一个非空表头开始的列号
-
-**判断标准**：
-- 如果所有列都有表头，则 start_col=1
-- 如果前几列为空（如第1、2列为空），从第3列开始有表头，则 start_col=3
+### 数据行特征：
+- 包含大量数值数据
+- 不再是表头文本或分类标签
 
 ## 输出格式
 
@@ -579,251 +485,82 @@ class SmartHeaderProcessor:
 ```json
 {{
     "skip_rows": <表头之前的无效行数，如果第1行就是表头则填0>,
-    "header_rows": <表头占用的总行数（包括所有表头行和合并单元格覆盖的所有行）>,
+    "header_rows": <表头占用的总行数>,
     "header_type": "<single或multi>",
     "data_start_row": <数据开始行号（1-indexed），必须等于skip_rows+header_rows+1>,
     "start_col": <数据起始列号（1-indexed）>,
     "valid_cols": null,
     "confidence": "<high/medium/low>",
-     "reason": "<详细说明：\n1. 如何识别无效行（skip_rows），特别说明是否包含填报说明、公司名称、只有数字的行等\n2. 如何识别表头层级结构（header_rows），特别说明合并单元格的处理\n3. 如何确定数据起始行和起始列>"
+    "reason": "<详细说明识别过程>"
 }}
 ```
 
-## 关键规则
+## 注意事项
 
-1. **无效行识别（重要）**：
-   - **只有数字没有标签的行是无效行**（如只有"222"、"111"、"22"这样的数字，没有"销售额"、"增长率"等标签）
-   - **公司名称、部门名称行是无效行**（如"XX公司"、"XX部门"、"卫栖梧额外企"）
-   - **填报说明行是无效行**（如"填报机构"、"填报日期"、"填报机构/日期"、"（填报机构/日期）"等，任何包含"填报"关键词的行）
-   - **空行或只有少量文本的行可能是无效行**
-   - **不包含合并单元格、列名、分类标签的行通常是无效行**
+1. 行号和列号都从1开始计数
+2. data_start_row 必须等于 skip_rows + header_rows + 1
+3. valid_cols 始终设为 null
+4. 只返回JSON，不要其他内容
+5. 如果第1行就是表头，则 skip_rows=0
+6. 多级表头的所有行都要计入 header_rows
 
-2. **表头行识别（重要）**：
-   - **包含合并单元格的行通常是表头**（合并单元格是表头的重要标识）
-   - **包含分类标签的行是表头**（如"销售事业部"、"华东大区"等）
-   - **包含列名的行是表头**（如"线上销售额"、"增长率"等）
-
-3. **表头行不能算作skip_rows**：如果1-5行都是表头，则 skip_rows=0, header_rows=5
-
-4. **合并单元格覆盖的所有行都是表头**：不要遗漏任何被合并单元格覆盖的行
-
-5. **不要因为行看起来"空"就认为它不是表头**：合并单元格的值只在左上角显示
-
-6. **行号和列号都从1开始计数**
-
-7. **valid_cols 始终设为 null**
-
-8. **只返回JSON，不要其他内容**
-
-## 复杂示例
-
-### 示例1：包含无效行的复杂表头
-
-如果表格结构是：
-- 第1行：只有数字"222"、"111"（无表头特征，无效行）
-- 第2行：空行或只有少量文本（无效行）
-- 第3行：公司名称"XX公司"或"卫栖梧额外企"和数字"22"（无效行）
-- 第4行：填报说明"填报机构/日期"或"（填报机构/日期）"（**无效行，必须识别**）
-- 第5行：合并单元格（行5，列D-I）显示"销售事业部"（表头开始！）
-- 第6行：合并单元格显示"华东大区"、"华北大区"等（表头）
-- 第7-9行：多级表头（表头）
-- 第10行：数据开始（包含数值）
-
-**分析过程**：
-1. **识别无效行**：
-   - 第1行：只有数字，无表头特征 → 无效行
-   - 第2行：空行 → 无效行
-   - 第3行：公司名称，无表头特征 → 无效行
-   - 第4行：填报说明"填报机构/日期" → **无效行**（包含"填报"关键词）
-   - 第5行：包含"销售事业部"和合并单元格 → **这是表头开始！**
-   - skip_rows=4（前4行都是无效行，包括填报说明行）
-
-2. **识别表头**：
-   - 第5行：合并单元格显示"销售事业部" → 表头
-   - 第6-9行：多级表头结构 → 表头
-   - header_rows=5（行5-9都是表头）
-
-3. **确定数据起始行**：
-   - data_start_row=10（skip_rows+header_rows+1=4+5+1）
-
-**正确输出**：
-```json
-{{
-    "skip_rows": 4,
-    "header_rows": 5,
-    "header_type": "multi",
-    "data_start_row": 10,
-    "start_col": 1,
-    "valid_cols": null,
-    "confidence": "high",
-     "reason": "第1-4行是无效行：第1行只有数字无表头特征，第2行空行，第3行公司名称，第4行填报说明'填报机构/日期'。第5行开始是表头（包含'销售事业部'和合并单元格），所以skip_rows=4。第5-9行是多级表头，所以header_rows=5。第10行开始包含数值数据，所以data_start_row=10。"
-}}
-```
-
-### 示例2：无无效行的表头
-
-如果表格结构是：
-- 第1行：合并单元格（行1-2，列1-5）显示"销售事业部"（大分类）
-- 第3行：合并单元格（行3-4，列1-3）显示"华东大区"（中分类）
-- 第5行：具体列名（"线上销售额"、"线下销售额"等）
-- 第6行：数据开始（包含数值）
-
-**分析过程**：
-1. skip_rows=0（第1行就是表头）
-2. header_rows=5（行1-5都是表头，包括合并单元格覆盖的行2和行4）
-3. data_start_row=6（skip_rows+header_rows+1=0+5+1）
-
-**正确输出**：
-```json
-{{
-    "skip_rows": 0,
-    "header_rows": 5,
-    "header_type": "multi",
-    "data_start_row": 6,
-    "start_col": 1,
-    "valid_cols": null,
-    "confidence": "high",
-    "reason": "第1行开始就是表头，skip_rows=0。第1行有合并单元格（行1-2），第3行有合并单元格（行3-4），第5行是具体列名，所以header_rows=5。第6行开始包含数值数据，所以data_start_row=6。"
-}}
-```"""
+只返回JSON，不要其他内容。"""
         
         return prompt
     
-    def _build_validation_prompt(self, preview_data: List[List], merged_info: List[Dict], 
+    def _build_validation_prompt(self, preview_data: List[List], 
                                 rule_analysis: HeaderAnalysis) -> str:
         """
-        构建LLM验证提示词（重构版）
-        
-        使用与分析方法一致的格式和逻辑
+        构建LLM验证提示词（简化版）
         """
-        # 格式化预览数据为表格形式（显示更多列）
-        num_cols_to_show = min(20, len(preview_data[0]) if preview_data else 20)
-        col_headers = " | ".join([f"列{i+1:2d}" for i in range(num_cols_to_show)])
-        table_str = f"行号 | {col_headers}\n" + "-" * 120 + "\n"
+        # 格式化预览数据为简单的表格形式
+        num_cols = len(preview_data[0]) if preview_data else 0
+        
+        table_str = "【Excel原始数据】（前15行，前25列）\n\n"
+        table_str += "行号 | " + " | ".join([f"列{i+1}" for i in range(num_cols)]) + "\n"
+        table_str += "-" * (8 + num_cols * 15) + "\n"
         
         for i, row in enumerate(preview_data, 1):
-            row_str = " | ".join(str(cell)[:12] for cell in row[:num_cols_to_show])
+            row_str = " | ".join([str(cell) if cell is not None else "" for cell in row])
             table_str += f"  {i:2d}  | {row_str}\n"
-        
-        # 格式化合并单元格信息（与分析方法一致）
-        if merged_info:
-            # 按行合并和列合并分类
-            row_merges = [m for m in merged_info if m.get('is_row_merge', False)]
-            col_merges = [m for m in merged_info if m.get('is_col_merge', False)]
-            both_merges = [m for m in merged_info if m.get('is_row_merge', False) and m.get('is_col_merge', False)]
-            
-            merged_str = "【合并单元格详细信息】\n\n"
-            
-            if both_merges:
-                merged_str += "同时跨行跨列的合并单元格：\n"
-                for m in both_merges[:20]:
-                    merged_str += f"  - 行{m['rows']} 列{m['cols']} (跨{m['row_span']}行{m['col_span']}列): '{m['value']}'\n"
-                merged_str += "\n"
-            
-            if row_merges:
-                merged_str += "跨行合并单元格：\n"
-                for m in row_merges[:20]:
-                    if not (m.get('is_row_merge') and m.get('is_col_merge')):
-                        merged_str += f"  - 行{m['rows']} (跨{m['row_span']}行): '{m['value']}'\n"
-                merged_str += "\n"
-            
-            # 按行号汇总
-            merged_str += "按行号汇总：\n"
-            row_merge_map = {}
-            for m in merged_info[:30]:
-                row_start = int(m['rows'].split('-')[0])
-                row_end = int(m['rows'].split('-')[1])
-                for r in range(row_start, row_end + 1):
-                    if r not in row_merge_map:
-                        row_merge_map[r] = []
-                    row_merge_map[r].append(f"'{m['value']}'")
-            
-            for row_num in sorted(row_merge_map.keys())[:30]:
-                merged_str += f"  行{row_num}: {', '.join(row_merge_map[row_num][:3])}\n"
-        else:
-            merged_str = "无合并单元格"
         
         prompt = f"""请验证以下Excel表格的表头分析结果是否正确。
 
-【表格预览】（前30行，[数值:xxx]表示数值类型，[合并:行X列Y]表示合并单元格，[合并内]表示合并单元格内部）
 {table_str}
 
-{merged_str}
-
 【当前分析结果】
-- 跳过行数(skip_rows): {rule_analysis.skip_rows} （表头之前的无效行数）
-- 表头行数(header_rows): {rule_analysis.header_rows} （所有表头行的总数，包括合并单元格覆盖的所有行）
+- 跳过行数(skip_rows): {rule_analysis.skip_rows}
+- 表头行数(header_rows): {rule_analysis.header_rows}
 - 表头类型: {rule_analysis.header_type}
 - 数据起始行: {rule_analysis.data_start_row} （应该等于 skip_rows + header_rows + 1）
 - 分析原因: {rule_analysis.reason}
 
 请验证这个结果是否合理，并以JSON格式返回：
 {{
-    "is_valid": <true或false，表示结果是否合理>,
+    "is_valid": <true或false>,
     "confidence": "<high/medium/low>",
     "suggestions": {{
-        "skip_rows": <建议的跳过行数，如果合理则与当前结果相同>,
-        "header_rows": <建议的表头行数，如果合理则与当前结果相同>,
+        "skip_rows": <建议的跳过行数>,
+        "header_rows": <建议的表头行数>,
         "header_type": "<single或multi>",
-        "data_start_row": <建议的数据起始行，应该等于skip_rows+header_rows+1>
+        "data_start_row": <建议的数据起始行>
     }},
-    "reason": "<验证说明：如果合理，说明为什么；如果不合理，指出问题并给出建议>"
+    "reason": "<验证说明>"
 }}
 
-## 验证要点（重要）
+## 验证要点
 
-### 1. skip_rows 验证
-- **关键**：skip_rows 只计算**表头之前**的无效行（如文档标题、注释等）
-- **常见错误**：不要把表头行算作skip_rows
-- **判断标准**：
-  - 如果第1行就是表头（包含列名、分类标签），则 skip_rows 应该为 0
-  - 如果前N行是文档标题等非表头内容，第N+1行才是表头，则 skip_rows 应该为 N
+1. skip_rows 只计算表头之前的无效行（如文档标题、注释等），不要把表头行算作skip_rows
+2. header_rows 应该包含所有表头行，包括多级表头的所有行
+3. data_start_row 必须等于 skip_rows + header_rows + 1
 
-### 2. header_rows 验证
-- **关键**：header_rows 应该包含**所有表头行**，包括多级表头的所有行
-- **判断标准**：
-  - 单表头：只有一行表头 → header_rows=1
-  - 多级表头：如果1-5行都是表头，则 header_rows=5
-  - **合并单元格处理（重要）**：
-    - 合并单元格跨越的所有行都应该计入 header_rows
-    - 即使合并单元格让某些行看起来"空"（值只在合并区域左上角），这些行仍然是表头的一部分
-    - 查看【合并单元格】信息，确认所有被合并的行都包含在 header_rows 中
-    - 例如：如果合并单元格显示"行1-2"，则行1和行2都应该计入 header_rows
-
-### 3. data_start_row 验证
-- **计算公式**：data_start_row 必须等于 skip_rows + header_rows + 1
-- **判断标准**：数据行通常包含数值数据，不再是表头文本
-
-### 4. 常见错误检查
-- ❌ **错误**：如果1-5行都是表头，但分析结果是 skip_rows=3, header_rows=3
-  - **正确**：应该是 skip_rows=0, header_rows=5
-- ❌ **错误**：把表头行误判为需要跳过的无效行
-- ❌ **错误**：遗漏了多级表头的某些行
-- ❌ **错误（合并单元格）**：如果合并单元格覆盖行1-2，但只计算了行1，遗漏了行2
-  - **正确**：合并单元格覆盖的所有行（行1-2）都应该计入 header_rows
-- ❌ **错误（合并单元格）**：因为合并单元格让某些行看起来"空"，就认为这些行不是表头
-  - **正确**：即使行看起来空（值在合并区域左上角），这些行仍然是表头的一部分
-
-## 验证步骤
-
-1. **首先查看合并单元格信息**：识别哪些行被合并单元格覆盖，这些行都应该计入 header_rows
-2. **确认表头范围**：从第几行到第几行是表头？（包括合并单元格覆盖的所有行）
-3. **检查skip_rows**：表头之前是否有无效行？如果没有，skip_rows应该为0
-4. **验证header_rows**：
-   - 是否包含了所有表头行？
-   - **特别注意**：合并单元格覆盖的所有行是否都包含在内？
-   - 不要因为某些行看起来"空"就认为它们不是表头
-5. **验证data_start_row**：是否等于 skip_rows + header_rows + 1？
-
-如果当前分析结果合理，保持原结果；如果不合理，在suggestions中给出修正建议。
-
-只返回JSON，不要其他内容"""
+只返回JSON，不要其他内容。"""
         
         return prompt
     
     def _call_llm(self, prompt: str, llm_api_key: Optional[str] = None, 
                   llm_base_url: Optional[str] = None, llm_model: Optional[str] = None,
-                  timeout: Optional[int] = None) -> str:
+                  timeout: Optional[int] = None, thinking_callback: Optional[callable] = None) -> str:
         """调用LLM API（支持OpenAI兼容接口）
         
         参数:
@@ -832,7 +569,14 @@ class SmartHeaderProcessor:
             llm_base_url: LLM API地址（可选，如果不提供则从配置读取）
             llm_model: LLM模型名称（可选，如果不提供则从配置读取）
             timeout: 超时时间（秒），默认30秒
+            thinking_callback: 用于流式输出 thinking 内容的回调函数（可选）
         """
+        # 提供默认回调函数，确保 thinking 内容总是被推送（不检查条件）
+        if thinking_callback is None:
+            # 默认回调函数：只输出到控制台（不推送到插件）
+            def default_callback(content: str):
+                pass  # 空回调，不执行任何操作
+            thinking_callback = default_callback
         # 优先使用传入的参数，否则从配置读取
         api_key = llm_api_key if llm_api_key is not None else EXCEL_LLM_API_KEY
         base_url = llm_base_url if llm_base_url is not None else EXCEL_LLM_BASE_URL
@@ -843,6 +587,7 @@ class SmartHeaderProcessor:
         logger.info(f"🔗 EXCEL_LLM_BASE_URL: {base_url}")
         logger.info(f"📌 模型: {model}")
         logger.info(f"🔑 API Key: {'已配置' if api_key else '未配置'}")
+        logger.info("💭 Thinking 流式输出: 已启用（默认开启）")
         
         if not api_key:
             logger.error("❌ 未配置 LLM API Key，无法进行分析")
@@ -855,13 +600,13 @@ class SmartHeaderProcessor:
             "Authorization": f"Bearer {api_key}"
         }
         
-        # 使用流式调用以支持 thinking 功能
+        # 使用流式调用以支持 thinking 功能（默认启用）
         base_payload = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.4,
             "max_tokens": 1000,  # 增加token数量以支持更详细的分析
-            "stream": True,  # 流式调用
+            "stream": True,  # 流式调用（必须启用以支持 thinking）
         }
         
         # 使用传入的超时时间，默认90秒
@@ -872,10 +617,11 @@ class SmartHeaderProcessor:
         logger.info(f"⏱️ 超时设置: {request_timeout} 秒")
         
         try:
-            # 优先尝试启用 thinking 功能
+            # 默认启用 thinking 功能（流式输出）
             payload_with_thinking = base_payload.copy()
-            payload_with_thinking["enable_thinking"] = True
+            payload_with_thinking["enable_thinking"] = True  # 默认启用 thinking
             
+            logger.info("💭 已启用 Thinking 功能，将实时流式输出思考过程")
             logger.debug(f"📦 请求 payload (启用 thinking): {json.dumps(payload_with_thinking, ensure_ascii=False, indent=2)}")
             
             response = requests.post(
@@ -891,7 +637,8 @@ class SmartHeaderProcessor:
                 try:
                     error_json = response.json()
                     if "enable_thinking" in str(error_json).lower():
-                        logger.warning("⚠️ 启用 thinking 失败，尝试不使用 thinking")
+                        logger.warning("⚠️ API 不支持 enable_thinking 参数，将回退到不使用 thinking")
+                        logger.warning("💭 注意：Thinking 流式输出将不可用（API 不支持）")
                         payload_no_thinking = base_payload.copy()
                         logger.debug(f"📦 请求 payload (不使用 thinking): {json.dumps(payload_no_thinking, ensure_ascii=False, indent=2)}")
                         response = requests.post(
@@ -937,6 +684,17 @@ class SmartHeaderProcessor:
             
             # 处理流式响应
             full_content = ""
+            full_thinking = ""  # 保存完整的 thinking 内容
+            thinking_started = False  # 标记是否已经开始输出 thinking
+            
+            logger.info("=" * 60)
+            logger.info("🧠 开始接收 LLM 流式响应（包含 thinking 过程）")
+            logger.info("💭 Thinking 流式输出已启用，将实时显示思考过程")
+            logger.info("=" * 60)
+            
+            # 用于调试：记录第一个 chunk 的完整结构
+            first_chunk_logged = False
+            
             for line in response.iter_lines():
                 if line:
                     line_str = line.decode('utf-8')
@@ -951,14 +709,130 @@ class SmartHeaderProcessor:
                     # 解析 JSON
                     try:
                         chunk_data = json.loads(line_str)
+                        
+                        # 调试：输出第一个 chunk 的完整结构（帮助了解 API 响应格式）
+                        if not first_chunk_logged:
+                            logger.info("=" * 60)
+                            logger.info("🔍 第一个 Chunk 完整结构（用于调试）:")
+                            logger.info("=" * 60)
+                            logger.info(json.dumps(chunk_data, ensure_ascii=False, indent=2))
+                            logger.info("=" * 60)
+                            first_chunk_logged = True
+                        
                         if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
-                            delta = chunk_data['choices'][0].get('delta', {})
+                            choice = chunk_data['choices'][0]
+                            delta = choice.get('delta', {})
+                            finish_reason = choice.get('finish_reason')
+                            
+                            # 检测是否有 thinking 相关字段（即使内容为空也要检测）
+                            has_thinking_field = False
+                            thinking_content = None
+                            
+                            # 方式1: delta.reasoning_content（Qwen 等模型使用）
+                            if 'reasoning_content' in delta:
+                                has_thinking_field = True
+                                thinking_content = delta.get('reasoning_content', '')
+                            
+                            # 方式2: delta.thinking（最常见）
+                            elif 'thinking' in delta:
+                                has_thinking_field = True
+                                thinking_content = delta.get('thinking', '')
+                            
+                            # 方式3: delta.reasoning（某些 API 使用）
+                            elif 'reasoning' in delta:
+                                has_thinking_field = True
+                                thinking_content = delta.get('reasoning', '')
+                            
+                            # 方式4: choice 中直接有 thinking 字段
+                            elif 'thinking' in choice:
+                                has_thinking_field = True
+                                thinking_content = choice.get('thinking', '')
+                            
+                            # 方式5: finish_reason 为 thinking 时，整个 delta 可能是 thinking
+                            elif finish_reason == 'thinking':
+                                has_thinking_field = True
+                                # 如果 finish_reason 是 thinking，尝试从 delta 中提取
+                                if delta:
+                                    # 尝试获取所有非 content 的字段作为 thinking
+                                    thinking_dict = {k: v for k, v in delta.items() if k != 'content' and k != 'role'}
+                                    if thinking_dict:
+                                        # 优先使用 reasoning_content
+                                        if 'reasoning_content' in thinking_dict:
+                                            thinking_content = thinking_dict['reasoning_content']
+                                        else:
+                                            thinking_content = json.dumps(thinking_dict, ensure_ascii=False)
+                                    else:
+                                        thinking_content = str(delta)
+                            
+                            # 方式6: 检查整个 chunk_data 中是否有 thinking 字段
+                            elif 'thinking' in chunk_data:
+                                has_thinking_field = True
+                                thinking_content = chunk_data.get('thinking', '')
+                            
+                            # 方式7: 检查整个 chunk_data 中是否有 reasoning_content 字段
+                            elif 'reasoning_content' in chunk_data:
+                                has_thinking_field = True
+                                thinking_content = chunk_data.get('reasoning_content', '')
+                            
+                            # 如果检测到 thinking 字段（即使内容为空），标记为已开始
+                            if has_thinking_field and not thinking_started:
+                                thinking_prefix = "💭 [Thinking] "
+                                logger.info("💭 开始输出 Thinking 过程...")
+                                # 总是调用回调函数（不检查条件，确保总是推送）
+                                thinking_callback(thinking_prefix)
+                                # 初始化日志计数器
+                                if not hasattr(self, '_thinking_log_count'):
+                                    self._thinking_log_count = 0
+                                self._thinking_log_count += 1
+                                logger.info(f"💭 [DEBUG] 已调用 thinking_callback 推送前缀 #{self._thinking_log_count}: '{thinking_prefix}'")
+                                thinking_started = True
+                            
+                            # 实时输出 thinking 内容（立即输出，不积累）
+                            # 注意：只要检测到 thinking 内容（包括空字符串），就立即推送
+                            if thinking_content is not None:
+                                # 确保 thinking_content 是字符串
+                                if not isinstance(thinking_content, str):
+                                    thinking_content = str(thinking_content)
+                                
+                                # 累积 thinking 内容（用于后续处理）
+                                full_thinking += thinking_content
+                                # 总是调用回调函数（不检查条件，确保总是推送，即使内容为空）
+                                thinking_callback(thinking_content)
+                                
+                                # 减少日志频率：每30个chunk记录一次，或内容长度 > 50 时记录
+                                if not hasattr(self, '_thinking_log_count'):
+                                    self._thinking_log_count = 0
+                                self._thinking_log_count += 1
+                                if self._thinking_log_count % 30 == 1 or len(thinking_content) > 50:
+                                    logger.info(f"💭 [DEBUG] 已调用 thinking_callback 推送内容 #{self._thinking_log_count}: {len(thinking_content)} 字符, 内容预览: '{thinking_content[:100] if len(thinking_content) > 100 else thinking_content}'")
+                            
+                            # 提取普通 content 内容
                             content = delta.get('content', '')
                             if content:
                                 full_content += content
+                            
+                            # 调试：输出 chunk 结构（仅在 debug 模式下）
+                            if logger.isEnabledFor(logging.DEBUG):
+                                logger.debug(f"📦 Chunk: finish_reason={finish_reason}, delta_keys={list(delta.keys())}, has_thinking={'thinking' in delta or 'thinking' in choice}, has_content=bool(content)")
+                            
                     except json.JSONDecodeError:
                         # 忽略无法解析的行（可能是空行或其他格式）
                         continue
+            
+            # Thinking 流式输出完成
+            if thinking_started:
+                logger.info("💭 Thinking 流式输出完成")
+            elif first_chunk_logged and not full_thinking:
+                # 如果收到了 chunk 但没有 thinking 内容，可能是 API 不支持或模型未生成 thinking
+                logger.info("💭 注意：已接收响应但未检测到 Thinking 内容（可能 API 不支持或模型未生成 thinking）")
+            
+            # 输出完整的 thinking 过程（如果有）
+            if full_thinking:
+                logger.info("=" * 60)
+                logger.info("🧠 LLM Thinking 过程（完整）:")
+                logger.info("=" * 60)
+                logger.info(full_thinking)
+                logger.info("=" * 60)
             
             if not full_content:
                 logger.warning("⚠️ LLM 流式响应为空")
@@ -1108,61 +982,6 @@ class SmartHeaderProcessor:
         # 解析失败，返回原规则分析结果
         return rule_analysis
     
-    # 已废弃：规则分析方法，现在必须使用LLM分析
-    # def analyze_with_rules(self) -> HeaderAnalysis:
-    #     """基于规则的分析（已废弃，现在必须使用LLM分析）"""
-    #     max_col = self.ws.max_column
-    #     skip_rows = 0
-    #     header_rows = 1
-    #     
-    #     # 检测需要跳过的行
-    #     for row in range(1, min(6, self.ws.max_row + 1)):
-    #         row_values = [self.get_cell_value(row, col) for col in range(1, max_col + 1)]
-    #         non_empty = sum(1 for v in row_values if v is not None)
-    #         
-    #         # 如果只有很少的非空单元格，可能是标题行
-    #         if non_empty <= 2 and non_empty < max_col * 0.3:
-    #             skip_rows = row
-    #         else:
-    #             break
-    #     
-    #     # 检测表头行数
-    #     header_start = skip_rows + 1
-    #     
-    #     # 检查合并单元格
-    #     max_merged_row = 0
-    #     for merged_range in self.ws.merged_cells.ranges:
-    #         if merged_range.min_row > skip_rows:
-    #             if merged_range.max_row > max_merged_row:
-    #                 max_merged_row = merged_range.max_row
-    #     
-    #     if max_merged_row > header_start:
-    #         header_rows = max_merged_row - skip_rows
-    #     
-    #     # 检测数据行开始位置
-    #     data_start = skip_rows + header_rows + 1
-    #     for row in range(header_start, min(skip_rows + 10, self.ws.max_row + 1)):
-    #         row_values = [self.get_cell_value(row, col) for col in range(1, max_col + 1)]
-    #         non_empty = sum(1 for v in row_values if v is not None)
-    #         numeric = sum(1 for v in row_values if isinstance(v, (int, float)) and not isinstance(v, bool))
-    #         
-    #         if non_empty > 0 and numeric / max(non_empty, 1) > 0.4:
-    #             data_start = row
-    #             header_rows = row - skip_rows - 1
-    #             break
-    #     
-    #     header_type = 'multi' if header_rows > 1 else 'single'
-    #     
-    #     return HeaderAnalysis(
-    #         skip_rows=skip_rows,
-    #         header_rows=max(1, header_rows),
-    #         header_type=header_type,
-    #         data_start_row=data_start,
-    #         confidence='medium',
-    #         reason='基于规则分析',
-    #         valid_cols=None
-    #     )
-    
     def _detect_valid_columns(self, skip_rows: int, header_rows: int, data_start_row: int) -> List[int]:
         """
         检测有效列（过滤无效列）
@@ -1234,6 +1053,26 @@ class SmartHeaderProcessor:
             cols_to_process = all_cols
         
         logger.info(f"📋 提取表头: 处理 {len(cols_to_process)} 列")
+        
+        # 调试：流式打印原始多级表头（不做任何美化）
+        print("=" * 80)
+        print("【原始多级表头 - 流式打印】")
+        print(f"表头行范围: 第 {header_start} 行到第 {header_end} 行")
+        print(f"处理列范围: 第 {analysis.start_col} 列到第 {max_col} 列")
+        print("=" * 80)
+        sys.stdout.flush()
+        
+        for row in range(header_start, header_end + 1):
+            row_values = []
+            for col in cols_to_process:
+                value = self.get_cell_value(row, col)
+                row_values.append(value)
+            # 直接打印，不做任何美化
+            print(f"行{row}: {row_values}")
+            sys.stdout.flush()
+        
+        print("=" * 80)
+        sys.stdout.flush()
         
         column_metadata = {}
         
@@ -1308,7 +1147,8 @@ class SmartHeaderProcessor:
                     llm_api_key: Optional[str] = None,
                     llm_base_url: Optional[str] = None,
                     llm_model: Optional[str] = None,
-                    preprocessing_timeout: Optional[int] = None) -> Tuple[pd.DataFrame, HeaderAnalysis, Dict[str, Dict], Optional[str]]:
+                    preprocessing_timeout: Optional[int] = None,
+                    thinking_callback: Optional[callable] = None) -> Tuple[pd.DataFrame, HeaderAnalysis, Dict[str, Dict], Optional[str]]:
         """
         转换为DataFrame
         
@@ -1338,7 +1178,8 @@ class SmartHeaderProcessor:
                 llm_api_key=llm_api_key,
                 llm_base_url=llm_base_url,
                 llm_model=llm_model,
-                timeout=preprocessing_timeout
+                timeout=preprocessing_timeout,
+                thinking_callback=thinking_callback
             )
             logger.info("✅ LLM分析完成（已包含行和列信息）")
             # 保存LLM响应到实例变量，以便后续使用
@@ -1424,6 +1265,741 @@ class SmartHeaderProcessor:
                 logger.warning(f"⚠️ 删除临时文件失败: {self._temp_xlsx_path}, 错误: {e}")
 
 
+def _validate_excel_file_basic(filepath: str, max_file_size_mb: Optional[int] = None) -> None:
+    """
+    基础文件检查（快速检查）
+    
+    参数:
+        filepath: Excel文件路径
+        max_file_size_mb: 最大文件大小（MB），如果为None则使用默认值
+    
+    异常:
+        FileNotFoundError: 文件不存在
+        ValueError: 文件为空或过大
+        PermissionError: 文件不可读
+    """
+    from .config import EXCEL_MAX_FILE_SIZE_MB
+    
+    # 检查文件是否存在
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Excel文件不存在: {filepath}")
+    
+    # 检查文件是否可读
+    if not os.access(filepath, os.R_OK):
+        raise PermissionError(f"Excel文件不可读: {filepath}")
+    
+    # 检查文件大小
+    file_size = os.path.getsize(filepath)
+    
+    # 检查是否为空文件
+    if file_size == 0:
+        raise ValueError(f"Excel文件为空（0字节）: {filepath}")
+    
+    # 检查文件大小限制
+    max_size_mb = max_file_size_mb if max_file_size_mb is not None else EXCEL_MAX_FILE_SIZE_MB
+    max_size_bytes = max_size_mb * 1024 * 1024
+    
+    if file_size > max_size_bytes:
+        file_size_mb = file_size / 1024 / 1024
+        raise ValueError(f"Excel文件过大: {file_size_mb:.2f}MB，超过限制（{max_size_mb}MB）: {filepath}")
+    
+    # 如果文件较大（> 100MB），记录警告
+    if file_size > 100 * 1024 * 1024:
+        file_size_mb = file_size / 1024 / 1024
+        logger.warning(f"⚠️ Excel文件较大: {file_size_mb:.2f}MB，处理可能较慢: {filepath}")
+
+
+def _validate_xlsx_format(filepath: str, timeout: float = 0.5) -> None:
+    """
+    验证 .xlsx 文件的ZIP格式（带超时保护）
+    
+    参数:
+        filepath: Excel文件路径
+        timeout: 超时时间（秒），默认0.5秒
+    
+    异常:
+        ValueError: ZIP格式错误或文件损坏
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+    
+    def _validate():
+        """在后台线程中验证ZIP格式"""
+        try:
+            # 检查ZIP文件头（前4个字节）
+            with open(filepath, 'rb') as f:
+                header = f.read(4)
+                if header != b'PK\x03\x04':
+                    raise ValueError(f"不是有效的Excel文件（ZIP格式错误）: {filepath}")
+            
+            # 尝试打开ZIP文件验证
+            try:
+                with zipfile.ZipFile(filepath, 'r') as zf:
+                    # 尝试读取ZIP文件列表（不实际解压）
+                    zf.namelist()
+            except zipfile.BadZipFile:
+                raise ValueError(f"Excel文件损坏（ZIP格式无效）: {filepath}")
+            except Exception as e:
+                # 其他异常可能是权限问题等，记录警告但继续
+                logger.warning(f"⚠️ ZIP验证时出现异常（可能不影响使用）: {e}")
+        except Exception as e:
+            if isinstance(e, ValueError):
+                raise
+            logger.error(f"验证ZIP格式失败: {filepath}, 错误: {e}")
+            raise ValueError(f"验证Excel文件格式失败: {str(e)}")
+    
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_validate)
+            try:
+                future.result(timeout=timeout)
+            except FutureTimeoutError:
+                logger.warning(f"⚠️ ZIP格式验证超时（{timeout}秒），但继续处理: {filepath}")
+                # ZIP验证超时不阻塞，只记录警告
+                future.cancel()
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise
+        logger.warning(f"⚠️ ZIP格式验证异常，但继续处理: {e}")
+
+
+def _validate_excel_structure(filepath: str, timeout: float = 2.0) -> None:
+    """
+    验证Excel文件结构完整性（带超时保护）
+    
+    参数:
+        filepath: Excel文件路径
+        timeout: 超时时间（秒），默认2秒
+    
+    异常:
+        ValueError: Excel文件结构不完整
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+    
+    def _validate():
+        """在后台线程中验证Excel结构"""
+        try:
+            with zipfile.ZipFile(filepath, 'r') as zf:
+                namelist = zf.namelist()
+                
+                # 检查必需的Excel文件
+                required_files = [
+                    '[Content_Types].xml',
+                    'xl/workbook.xml'
+                ]
+                
+                missing_files = []
+                for req_file in required_files:
+                    # 检查文件是否存在（可能路径略有不同）
+                    found = False
+                    for name in namelist:
+                        if name == req_file or name.endswith('/' + req_file):
+                            found = True
+                            break
+                    if not found:
+                        missing_files.append(req_file)
+                
+                if missing_files:
+                    raise ValueError(
+                        f"Excel文件结构不完整，缺少必需文件: {', '.join(missing_files)}: {filepath}"
+                    )
+        except zipfile.BadZipFile:
+            # 如果ZIP文件本身有问题，这个应该在之前的检查中发现
+            raise ValueError(f"Excel文件损坏（ZIP格式无效）: {filepath}")
+        except Exception as e:
+            if isinstance(e, ValueError):
+                raise
+            logger.error(f"验证Excel结构失败: {filepath}, 错误: {e}")
+            raise ValueError(f"验证Excel文件结构失败: {str(e)}")
+    
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_validate)
+            try:
+                future.result(timeout=timeout)
+            except FutureTimeoutError:
+                logger.warning(f"⚠️ Excel结构验证超时（{timeout}秒），但继续处理: {filepath}")
+                # 结构验证超时不阻塞，只记录警告
+                future.cancel()
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise
+        logger.warning(f"⚠️ Excel结构验证异常，但继续处理: {e}")
+
+
+def _validate_excel_row_count(filepath: str, sheet_name: str = None, max_rows: int = 10000, timeout: float = 5.0) -> None:
+    """
+    验证Excel文件的行数（带超时保护）
+    
+    参数:
+        filepath: Excel文件路径
+        sheet_name: 工作表名称（可选），如果为None则检查第一个工作表
+        max_rows: 最大允许行数，默认10000
+        timeout: 超时时间（秒），默认5秒
+    
+    异常:
+        ValueError: 行数超过限制
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+    
+    def _check_rows():
+        """在后台线程中检查行数"""
+        try:
+            file_ext = Path(filepath).suffix.lower()
+            
+            # 如果是 .xls 格式，需要先转换（但这里只做快速检查，不转换）
+            # 对于 .xls 文件，跳过行数检查（因为转换需要时间）
+            if file_ext == '.xls':
+                logger.debug(f"⚠️ .xls 文件跳过行数检查（需要转换后才能检查）: {filepath}")
+                return
+            
+            # 使用 read_only=True 模式，快速读取行数
+            wb = load_workbook(filepath, data_only=True, read_only=True)
+            
+            try:
+                # 选择工作表
+                if sheet_name:
+                    if sheet_name not in wb.sheetnames:
+                        raise ValueError(f"工作表 '{sheet_name}' 不存在: {filepath}")
+                    ws = wb[sheet_name]
+                else:
+                    if not wb.sheetnames:
+                        raise ValueError(f"Excel文件不包含任何工作表: {filepath}")
+                    ws = wb[wb.sheetnames[0]]  # 检查第一个工作表
+                
+                # 获取最大行数
+                row_count = ws.max_row
+                logger.info(f"📊 Excel文件行数检查: {row_count} 行（限制: {max_rows} 行）")
+                
+                if row_count > max_rows:
+                    raise ValueError(
+                        f"Excel文件行数过多: {row_count} 行，超过限制（{max_rows} 行）: {filepath}"
+                    )
+            finally:
+                wb.close()
+        except Exception as e:
+            if isinstance(e, ValueError):
+                raise
+            logger.error(f"检查Excel行数失败: {filepath}, 错误: {e}")
+            raise ValueError(f"检查Excel文件行数失败: {str(e)}")
+    
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_check_rows)
+            try:
+                future.result(timeout=timeout)
+            except FutureTimeoutError:
+                logger.warning(f"⚠️ Excel行数检查超时（{timeout}秒），但继续处理: {filepath}")
+                # 行数检查超时不阻塞，只记录警告
+                future.cancel()
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise
+        logger.warning(f"⚠️ Excel行数检查异常，但继续处理: {e}")
+
+
+def print_excel_raw_data(filepath: str, sheet_name: str = None, max_rows: int = 15, max_cols: int = 25) -> None:
+    """
+    打印Excel文件的原始数据（前15行，前25列）
+    
+    参数:
+        filepath: Excel文件路径
+        sheet_name: 工作表名称（可选）
+        max_rows: 最大行数，默认15
+        max_cols: 最大列数，默认25
+    """
+    try:
+        logger.info(f"📂 [DEBUG] print_excel_raw_data: 开始处理文件 {filepath}")
+        from openpyxl import load_workbook
+        
+        # 加载工作簿
+        logger.info(f"⏳ [DEBUG] print_excel_raw_data: 开始加载工作簿 (read_only=True)...")
+        wb = load_workbook(filepath, data_only=True, read_only=True)
+        logger.info(f"✅ [DEBUG] print_excel_raw_data: 工作簿加载完成")
+        
+        # 选择工作表
+        logger.info(f"📋 [DEBUG] print_excel_raw_data: 选择工作表...")
+        if sheet_name:
+            ws = wb[sheet_name]
+            logger.info(f"✅ [DEBUG] print_excel_raw_data: 使用指定工作表: {sheet_name}")
+        else:
+            if not wb.sheetnames:
+                logger.warning("⚠️ [DEBUG] print_excel_raw_data: Excel文件不包含任何工作表")
+                print("⚠️ Excel文件不包含任何工作表")
+                return
+            ws = wb[wb.sheetnames[0]]
+            logger.info(f"✅ [DEBUG] print_excel_raw_data: 使用默认工作表: {ws.title}")
+        
+        # 确定实际读取范围
+        logger.info(f"📏 [DEBUG] print_excel_raw_data: 工作表大小 - 最大行: {ws.max_row}, 最大列: {ws.max_column}")
+        actual_max_col = min(ws.max_column, max_cols)
+        actual_max_row = min(ws.max_row, max_rows)
+        logger.info(f"📏 [DEBUG] print_excel_raw_data: 实际读取范围 - 行: {actual_max_row}, 列: {actual_max_col}")
+        
+        # 打印原始数据
+        logger.info(f"🖨️ [DEBUG] print_excel_raw_data: 开始打印数据...")
+        print("=" * 80)
+        print(f"【最初传入的Excel原始数据 - 控制台打印】（前{actual_max_row}行，前{actual_max_col}列）")
+        print(f"文件: {os.path.basename(filepath)}")
+        print(f"工作表: {ws.title}")
+        print("=" * 80)
+        sys.stdout.flush()
+        
+        logger.info(f"🔄 [DEBUG] print_excel_raw_data: 开始遍历单元格...")
+        for row in range(1, actual_max_row + 1):
+            row_data = []
+            for col in range(1, actual_max_col + 1):
+                value = ws.cell(row, col).value
+                row_data.append(value)
+            print(f"行{row}: {row_data}")
+            sys.stdout.flush()
+            if row % 5 == 0:  # 每5行记录一次日志
+                logger.info(f"📊 [DEBUG] print_excel_raw_data: 已处理 {row}/{actual_max_row} 行")
+        
+        print("=" * 80)
+        sys.stdout.flush()
+        logger.info(f"✅ [DEBUG] print_excel_raw_data: 数据打印完成")
+        
+        # 关闭工作簿
+        logger.info(f"🔒 [DEBUG] print_excel_raw_data: 关闭工作簿...")
+        print("🔍 [DEBUG] print_excel_raw_data: 准备关闭工作簿（使用print输出）")
+        sys.stdout.flush()
+        wb.close()
+        print("🔍 [DEBUG] print_excel_raw_data: 工作簿已关闭（使用print输出）")
+        sys.stdout.flush()
+        logger.info(f"✅ [DEBUG] print_excel_raw_data: 工作簿已关闭")
+        
+        # 显式删除引用，帮助垃圾回收
+        del wb
+        del ws
+        import gc
+        gc.collect()  # 强制垃圾回收
+        print("🔍 [DEBUG] print_excel_raw_data: 垃圾回收完成（使用print输出）")
+        sys.stdout.flush()
+        
+        logger.info(f"🏁 [DEBUG] print_excel_raw_data: 函数即将返回，所有操作已完成")
+        # 强制刷新输出
+        sys.stdout.flush()
+        logger.info(f"✅ [DEBUG] print_excel_raw_data: 函数执行完成，准备返回")
+        # 使用 print 直接输出，确保能看到
+        print("🔍 [DEBUG] print_excel_raw_data: 函数即将返回（使用print输出）")
+        sys.stdout.flush()
+        # 最后一条日志
+        logger.info(f"🏁 [DEBUG] print_excel_raw_data: 函数返回前最后一条日志")
+        print("🔍 [DEBUG] print_excel_raw_data: 函数返回（使用print输出）")
+        sys.stdout.flush()
+        return  # 显式返回
+        
+    except Exception as e:
+        logger.error(f"❌ [DEBUG] print_excel_raw_data: 打印Excel原始数据失败: {filepath}, 错误: {e}", exc_info=True)
+        print(f"⚠️ 打印Excel原始数据失败: {str(e)}")
+        sys.stdout.flush()
+
+
+def _get_preview_data_lightweight(filepath: str, sheet_name: str = None, max_rows: int = 15, max_cols: int = 25, timeout: int = 10, max_file_size_mb: Optional[int] = None, max_excel_rows: Optional[int] = None) -> Tuple[List[List[Any]], int]:
+    """
+    轻量级获取Excel预览数据（使用read_only模式，用于表头分析）
+    
+    参数:
+        filepath: Excel文件路径
+        sheet_name: 工作表名称（可选）
+        max_rows: 最大行数，默认15
+        max_cols: 最大列数，默认25
+        timeout: 超时时间（秒），默认10秒
+        max_file_size_mb: 最大文件大小（MB），如果为None则使用默认值
+    
+    返回:
+        (预览数据列表, 最大列数)
+    """
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+    
+    def _read_preview():
+        """在后台线程中读取预览数据"""
+        try:
+            # 文件预检查（基础检查 + ZIP验证）
+            _validate_excel_file_basic(filepath, max_file_size_mb=max_file_size_mb)
+            file_ext = Path(filepath).suffix.lower()
+            if file_ext == '.xlsx':
+                _validate_xlsx_format(filepath, timeout=0.5)
+                # 行数检查（超过配置的最大行数直接拒绝）
+                try:
+                    max_rows_value = max_excel_rows if max_excel_rows is not None else 10000
+                    _validate_excel_row_count(filepath, sheet_name=sheet_name, max_rows=max_rows_value, timeout=5.0)
+                except ValueError as row_error:
+                    # 捕获行数检查异常，转换为可识别的异常
+                    if "行数过多" in str(row_error) or "超过限制" in str(row_error):
+                        # 重新抛出，但标记为行数限制错误
+                        raise ValueError(f"Excel文件行数超过限制: {str(row_error)}") from row_error
+                    raise
+            
+            # 使用 read_only=True 模式，更快且更轻量
+            wb = load_workbook(filepath, data_only=True, read_only=True)
+            
+            # 选择工作表
+            if sheet_name:
+                ws = wb[sheet_name]
+            else:
+                if not wb.sheetnames:
+                    raise ValueError("Excel文件不包含任何工作表")
+                ws = wb[wb.sheetnames[0]]
+            
+            # 确定实际读取范围
+            actual_max_col = min(ws.max_column, max_cols)
+            actual_max_row = min(ws.max_row, max_rows)
+            max_col = ws.max_column  # 保存总列数
+            
+            # 读取数据
+            data = []
+            for row in range(1, actual_max_row + 1):
+                row_data = []
+                for col in range(1, actual_max_col + 1):
+                    value = ws.cell(row, col).value
+                    row_data.append(value)
+                data.append(row_data)
+            
+            wb.close()
+            return data, max_col
+        except Exception as e:
+            logger.error(f"读取Excel预览数据失败: {filepath}, 错误: {e}")
+            raise
+    
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_read_preview)
+            try:
+                data, max_col = future.result(timeout=timeout)
+                return data, max_col
+            except FutureTimeoutError:
+                logger.error(f"读取Excel预览数据超时: {filepath} (超时时间: {timeout}秒)")
+                future.cancel()
+                raise TimeoutError(f"读取Excel预览数据超时（{timeout}秒）: {filepath}")
+    except Exception as e:
+        if isinstance(e, TimeoutError):
+            raise
+        # 如果是行数检查异常，重新抛出以便上层处理
+        if isinstance(e, ValueError) and ("行数超过限制" in str(e) or "行数过多" in str(e)):
+            raise
+        logger.error(f"读取Excel预览数据时发生异常: {filepath}, 错误: {e}")
+        raise
+
+
+def _analyze_header_with_llm_lightweight(preview_data: List[List[Any]], max_col: int,
+                                         llm_api_key: Optional[str] = None,
+                                         llm_base_url: Optional[str] = None,
+                                         llm_model: Optional[str] = None,
+                                         timeout: Optional[int] = None,
+                                         thinking_callback: Optional[callable] = None) -> Tuple[HeaderAnalysis, str]:
+    """
+    使用LLM分析表头结构（轻量级版本，不需要SmartHeaderProcessor）
+    
+    参数:
+        preview_data: 预览数据列表
+        max_col: 最大列数
+        llm_api_key: LLM API密钥（可选）
+        llm_base_url: LLM API地址（可选）
+        llm_model: LLM模型名称（可选）
+        timeout: 超时时间（秒），默认90秒
+        thinking_callback: 用于流式输出 thinking 内容的回调函数（可选）
+    
+    返回:
+        (分析结果, LLM原始响应)
+    """
+    # 构建提示词
+    num_cols = len(preview_data[0]) if preview_data else 0
+    num_rows = len(preview_data)
+    
+    # 构建简单的表格字符串
+    table_str = "【Excel原始数据】（前15行，前25列）\n\n"
+    table_str += "行号 | " + " | ".join([f"列{i+1}" for i in range(num_cols)]) + "\n"
+    table_str += "-" * (8 + num_cols * 15) + "\n"
+    
+    for i, row in enumerate(preview_data, 1):
+        row_str = " | ".join([str(cell) if cell is not None else "" for cell in row])
+        table_str += f"  {i:2d}  | {row_str}\n"
+    
+    prompt = f"""你是一个Excel表格结构分析专家。请分析以下Excel表格的原始数据，识别表头结构。
+
+{table_str}
+
+【总列数】{max_col}
+
+## 分析任务
+
+请分析表格结构，识别：
+1. **无效行（skip_rows）**：表头之前的无效行（如文档标题、说明文字、注释、公司名称、填报说明等）
+2. **表头行数（header_rows）**：所有表头行，包括多级表头的所有层级
+3. **表头类型（header_type）**：single（单表头）或 multi（多级表头）
+4. **数据起始行（data_start_row）**：数据开始的行号，必须等于 skip_rows + header_rows + 1
+5. **数据起始列（start_col）**：第一个表头行中第一个非空表头开始的列号
+
+## 识别规则
+
+### 无效行特征：
+- 文档标题（如"2024年度报表"）
+- 公司名称或部门名称（如"XX公司"、"XX部门"）
+- 填报说明（如"填报机构"、"填报日期"、"填报机构/日期"等，任何包含"填报"关键词的行）
+- 只有数字没有标签的行（如只有"222"、"111"等数字，没有对应的列名）
+- 完全空行或只有少量文本的行
+
+### 表头行特征：
+- 包含列名或分类标签（如"销售事业部"、"华东大区"、"线上销售额"等）
+- 有明确的层级结构（多级表头）
+- 通常不包含大量数值数据
+
+### 数据行特征：
+- 包含大量数值数据
+- 不再是表头文本或分类标签
+
+## 输出格式
+
+请以JSON格式返回分析结果：
+
+```json
+{{
+    "skip_rows": <表头之前的无效行数，如果第1行就是表头则填0>,
+    "header_rows": <表头占用的总行数>,
+    "header_type": "<single或multi>",
+    "data_start_row": <数据开始行号（1-indexed），必须等于skip_rows+header_rows+1>,
+    "start_col": <数据起始列号（1-indexed）>,
+    "valid_cols": null,
+    "confidence": "<high/medium/low>",
+    "reason": "<详细说明识别过程>"
+}}
+```
+
+## 注意事项
+
+1. 行号和列号都从1开始计数
+2. data_start_row 必须等于 skip_rows + header_rows + 1
+3. valid_cols 始终设为 null
+4. 只返回JSON，不要其他内容
+5. 如果第1行就是表头，则 skip_rows=0
+6. 多级表头的所有行都要计入 header_rows
+
+只返回JSON，不要其他内容。"""
+    
+    # 调用LLM
+    from .config import EXCEL_LLM_API_KEY, EXCEL_LLM_BASE_URL, EXCEL_LLM_MODEL
+    api_key = llm_api_key if llm_api_key is not None else EXCEL_LLM_API_KEY
+    if not api_key:
+        raise ValueError("LLM API密钥未配置，无法进行Excel分析。请配置EXCEL_LLM_API_KEY或传入llm_api_key参数")
+    
+    # 调用LLM API
+    result = _call_llm_api(prompt, api_key, llm_base_url or EXCEL_LLM_BASE_URL, llm_model or EXCEL_LLM_MODEL, timeout=timeout, thinking_callback=thinking_callback)
+    
+    if not result:
+        raise ValueError("LLM分析失败：无法获取LLM响应，请检查API配置")
+    
+    # 解析LLM分析结果
+    analysis = _parse_llm_analysis_response_lightweight(result)
+    
+    return analysis, result
+
+
+def _call_llm_api(prompt: str, 
+                  llm_api_key: str,
+                  llm_base_url: Optional[str] = None,
+                  llm_model: Optional[str] = None,
+                  timeout: Optional[int] = None,
+                  thinking_callback: Optional[callable] = None) -> str:
+    """
+    调用LLM API（独立函数，不依赖SmartHeaderProcessor）
+    """
+    from .config import EXCEL_LLM_BASE_URL, EXCEL_LLM_MODEL
+    
+    base_url = llm_base_url or EXCEL_LLM_BASE_URL
+    model = llm_model or EXCEL_LLM_MODEL
+    
+    if not base_url:
+        raise ValueError("LLM API地址未配置，请配置EXCEL_LLM_BASE_URL或传入llm_base_url参数")
+    
+    if not model:
+        raise ValueError("LLM模型名称未配置，请配置EXCEL_LLM_MODEL或传入llm_model参数")
+    
+    # 使用传入的超时时间，默认90秒
+    request_timeout = timeout if timeout is not None else 90
+    
+    logger.info(f"⏱️ 超时设置: {request_timeout} 秒")
+    
+    # 构建请求URL和参数
+    # 注意：base_url 应该已经包含完整的路径（如 /v1/chat/completions），直接使用
+    url = base_url
+    headers = {
+        "Authorization": f"Bearer {llm_api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    # 构建消息
+    messages = [{"role": "user", "content": prompt}]
+    
+    # 使用流式调用以支持 thinking 功能（默认启用）
+    base_payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.4,
+        "max_tokens": 1000,
+        "stream": True,  # 流式调用（必须启用以支持 thinking）
+    }
+    
+    # 提供默认回调函数
+    if thinking_callback is None:
+        def default_callback(content: str):
+            pass  # 空回调，不执行任何操作
+        thinking_callback = default_callback
+    
+    logger.info(f"📡 发送 LLM API 请求到: {url} (流式调用)")
+    logger.info(f"📝 提示词长度: {len(prompt)} 字符")
+    
+    try:
+        # 默认启用 thinking 功能（流式输出）
+        payload_with_thinking = base_payload.copy()
+        payload_with_thinking["enable_thinking"] = True  # 默认启用 thinking
+        
+        logger.info("💭 已启用 Thinking 功能，将实时流式输出思考过程")
+        
+        response = requests.post(
+            url, 
+            headers=headers, 
+            json=payload_with_thinking, 
+            timeout=request_timeout,
+            stream=True  # 启用流式响应
+        )
+        
+        # 如果启用 thinking 失败，回退到不使用 thinking
+        if response.status_code != 200:
+            try:
+                error_json = response.json()
+                if "enable_thinking" in str(error_json).lower():
+                    logger.warning("⚠️ API 不支持 enable_thinking 参数，将回退到不使用 thinking")
+                    logger.warning("💭 注意：Thinking 流式输出将不可用（API 不支持）")
+                    payload_no_thinking = base_payload.copy()
+                    response = requests.post(
+                        url, 
+                        headers=headers, 
+                        json=payload_no_thinking, 
+                        timeout=request_timeout,
+                        stream=True
+                    )
+            except:
+                pass
+        
+        # 如果请求失败，输出详细的错误信息
+        if response.status_code != 200:
+            error_detail = ""
+            try:
+                # 对于流式响应，尝试读取错误信息
+                error_text = ""
+                for line in response.iter_lines():
+                    if line:
+                        error_text += line.decode('utf-8') + "\n"
+                error_detail = error_text
+            except:
+                try:
+                    error_json = response.json()
+                    error_detail = json.dumps(error_json, ensure_ascii=False, indent=2)
+                except:
+                    error_detail = response.text
+            
+            logger.error(f"❌ LLM API 调用失败 (状态码: {response.status_code})")
+            logger.error(f"📋 错误详情: {error_detail}")
+            response.raise_for_status()
+        
+        # 处理流式响应
+        full_content = ""
+        for line in response.iter_lines():
+            if line:
+                line_str = line.decode('utf-8')
+                if line_str.startswith('data: '):
+                    data_str = line_str[6:]
+                    if data_str.strip() == '[DONE]':
+                        break
+                    try:
+                        chunk_data = json.loads(data_str)
+                        if 'choices' in chunk_data and len(chunk_data['choices']) > 0:
+                            delta = chunk_data['choices'][0].get('delta', {})
+                            # 使用 get 方法并提供默认值，避免 None 值
+                            content = delta.get('content', '')
+                            if content:
+                                full_content += content
+                                thinking_callback(content)
+                    except json.JSONDecodeError:
+                        continue
+        
+        if not full_content:
+            logger.warning("⚠️ LLM 流式响应为空")
+            return None
+        
+        logger.info("✅ LLM API 调用成功")
+        return full_content
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ LLM调用失败 (网络错误): {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            try:
+                error_json = e.response.json()
+                logger.error(f"📋 API 错误响应: {json.dumps(error_json, ensure_ascii=False, indent=2)}")
+            except:
+                logger.error(f"📋 API 错误响应 (文本): {e.response.text}")
+        logger.debug("异常详情:", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"❌ LLM调用失败: {e}")
+        logger.debug("异常详情:", exc_info=True)
+        return None
+
+
+def _parse_llm_analysis_response_lightweight(response: str) -> HeaderAnalysis:
+    """解析LLM分析结果（轻量级版本，不依赖SmartHeaderProcessor）"""
+    if not response:
+        raise ValueError("LLM响应为空")
+    
+    try:
+        # 提取JSON部分（支持嵌套JSON）
+        start_idx = response.find('{')
+        end_idx = response.rfind('}')
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            json_str = response[start_idx:end_idx + 1]
+            data = json.loads(json_str)
+        else:
+            # 如果找不到完整的JSON，尝试用正则匹配
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if not json_match:
+                raise ValueError("未找到JSON格式的响应")
+            data = json.loads(json_match.group())
+        
+        # 解析有效列（始终为None）
+        valid_cols = None
+        
+        # 解析起始列（默认为1）
+        start_col = int(data.get('start_col', 1))
+        if start_col < 1:
+            start_col = 1
+        
+        # 构建HeaderAnalysis对象
+        analysis = HeaderAnalysis(
+            skip_rows=int(data.get('skip_rows', 0)),
+            header_rows=int(data.get('header_rows', 1)),
+            header_type=data.get('header_type', 'single'),
+            data_start_row=int(data.get('data_start_row', 1)),
+            start_col=start_col,
+            confidence=data.get('confidence', 'medium'),
+            reason=f"LLM分析: {data.get('reason', '')}",
+            valid_cols=valid_cols
+        )
+        
+        logger.info(f"✅ LLM分析完成:")
+        logger.info(f"  - 跳过行数: {analysis.skip_rows}")
+        logger.info(f"  - 表头行数: {analysis.header_rows}")
+        logger.info(f"  - 表头类型: {analysis.header_type}")
+        logger.info(f"  - 数据起始行: {analysis.data_start_row}")
+        logger.info(f"  - 数据起始列: {analysis.start_col}")
+        logger.info(f"  - 置信度: {analysis.confidence}")
+        
+        return analysis
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        logger.error(f"❌ 解析LLM分析响应失败: {e}")
+        logger.error(f"📋 响应内容: {response[:500]}")
+        raise ValueError(f"解析LLM分析响应失败: {e}")
+
+
 def _save_csv_with_timeout(df: pd.DataFrame, csv_path: str, timeout: int = 30) -> None:
     """带超时保护的保存CSV文件"""
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
@@ -1462,7 +2038,11 @@ def process_excel_file(
     llm_base_url: Optional[str] = None,
     llm_model: Optional[str] = None,
     preprocessing_timeout: Optional[int] = None,
-    excel_processing_timeout: Optional[int] = None  # Excel处理超时时间（秒），在LLM分析之前
+    excel_processing_timeout: Optional[int] = None,  # Excel处理超时时间（秒），在LLM分析之前
+    debug_print_header_analysis: bool = False,  # 是否流式打印原始数据（用于调试）
+    thinking_callback: Optional[callable] = None,  # 用于流式输出 thinking 内容的回调函数
+    max_file_size_mb: Optional[int] = None,  # 最大文件大小（MB），如果为None则使用默认值
+    max_rows: Optional[int] = None  # 最大行数，如果为None则使用默认值10000
 ) -> ExcelProcessResult:
     """
     处理Excel文件的主函数
@@ -1477,7 +2057,9 @@ def process_excel_file(
         llm_base_url: LLM API地址（可选）
         llm_model: LLM模型名称（可选）
         preprocessing_timeout: 预处理超时时间（秒），默认90秒
-        excel_processing_timeout: Excel加载超时时间（秒），默认60秒
+        excel_processing_timeout: Excel处理超时时间（秒），默认10秒（包括文件加载和数据读取）
+        debug_print_header_analysis: 是否流式打印原始数据（用于调试），默认False
+        max_file_size_mb: 最大文件大小（MB），如果为None则使用默认值
     
     返回:
         ExcelProcessResult
@@ -1486,20 +2068,97 @@ def process_excel_file(
         现在必须使用LLM进行分析，不再支持规则分析。请确保提供llm_api_key参数。
     """
     try:
+        logger.info(f"🚀 [DEBUG] process_excel_file: 开始处理文件 {filepath}")
         # 确保输出目录存在
+        logger.info(f"📁 [DEBUG] process_excel_file: 确保输出目录存在: {output_dir}")
         os.makedirs(output_dir, exist_ok=True)
+        logger.info(f"✅ [DEBUG] process_excel_file: 输出目录已准备")
         
         # 设置超时时间
-        excel_processing_timeout_seconds = excel_processing_timeout if excel_processing_timeout is not None else 60
-        # Excel 加载超时时间（用于 SmartHeaderProcessor.__init__）
-        load_timeout = excel_processing_timeout_seconds
+        excel_processing_timeout_seconds = excel_processing_timeout if excel_processing_timeout is not None else 10
+        logger.info(f"⏱️ [DEBUG] process_excel_file: Excel处理超时时间: {excel_processing_timeout_seconds}秒")
         
-        # 处理Excel（现在总是使用LLM分析）
-        # 注意：SmartHeaderProcessor.__init__ 内部已经有超时保护，如果超时会抛出 TimeoutError
+        # 第一步：使用轻量级方式获取预览数据并进行LLM分析（不需要创建SmartHeaderProcessor）
+        logger.info(f"📂 [DEBUG] process_excel_file: 开始获取预览数据（轻量级模式）")
+        logger.info(f"📂 [DEBUG] process_excel_file: 文件路径: {filepath}, 工作表: {sheet_name}")
+        
         try:
-            processor = SmartHeaderProcessor(filepath, sheet_name, load_timeout=load_timeout)
+            preview_data, max_col = _get_preview_data_lightweight(
+                filepath, 
+                sheet_name, 
+                max_rows=15, 
+                max_cols=25, 
+                timeout=excel_processing_timeout_seconds,
+                max_file_size_mb=max_file_size_mb,
+                max_excel_rows=max_rows
+            )
+            logger.info(f"✅ [DEBUG] process_excel_file: 预览数据获取完成，共 {len(preview_data)} 行，{max_col} 列")
         except TimeoutError as e:
-            error_msg = f"Excel文件加载超时: {str(e)}"
+            error_msg = f"获取Excel预览数据超时: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            return ExcelProcessResult(
+                success=False,
+                header_analysis=None,
+                processed_file_path=None,
+                metadata_file_path=None,
+                column_names=[],
+                column_metadata={},
+                row_count=0,
+                error_message=error_msg
+            )
+        except Exception as e:
+            # 捕获所有异常，检查是否是行数检查异常（因为可能是从线程池抛出的）
+            error_str = str(e)
+            error_type = type(e).__name__
+            
+            # 检查是否是行数相关的错误（支持多种格式）
+            is_row_limit_error = (
+                "行数超过限制" in error_str or 
+                "行数过多" in error_str or 
+                ("超过限制" in error_str and "行" in error_str) or
+                (isinstance(e, ValueError) and "行数" in error_str and "限制" in error_str)
+            )
+            
+            if is_row_limit_error:
+                # 提取行数信息
+                import re
+                match = re.search(r'(\d+)\s*行', error_str)
+                row_count = match.group(1) if match else "未知"
+                match_limit = re.search(r'限制[（(](\d+)\s*行', error_str)
+                if not match_limit:
+                    match_limit = re.search(r'超过限制[（(](\d+)\s*行', error_str)
+                limit = match_limit.group(1) if match_limit else (max_rows if max_rows else 10000)
+                error_msg = f"Excel文件行数过多（{row_count} 行），超过限制（{limit} 行）。请减少文件行数或调整配置中的最大行数限制。"
+                logger.warning(f"⚠️ {error_msg}")
+                return ExcelProcessResult(
+                    success=False,
+                    header_analysis=None,
+                    processed_file_path=None,
+                    metadata_file_path=None,
+                    column_names=[],
+                    column_metadata={},
+                    row_count=0,
+                    error_message=error_msg
+                )
+            # 其他异常继续抛出
+            logger.error(f"❌ 获取Excel预览数据时发生未处理的异常: {error_type}: {error_str}")
+            raise
+        
+        # 第二步：使用预览数据进行LLM分析
+        logger.info("🤖 开始LLM表头分析（使用预览数据）...")
+        try:
+            analysis, llm_response = _analyze_header_with_llm_lightweight(
+                preview_data,
+                max_col,
+                llm_api_key=llm_api_key,
+                llm_base_url=llm_base_url,
+                llm_model=llm_model,
+                timeout=preprocessing_timeout,
+                thinking_callback=thinking_callback
+            )
+            logger.info("✅ LLM表头分析完成")
+        except Exception as e:
+            error_msg = f"LLM表头分析失败: {str(e)}"
             logger.error(f"❌ {error_msg}")
             return ExcelProcessResult(
                 success=False,
@@ -1512,13 +2171,77 @@ def process_excel_file(
                 error_message=error_msg
             )
         
-        df, analysis, column_metadata, llm_response = processor.to_dataframe(
-            use_llm_validate=True,  # 总是使用LLM，忽略传入的use_llm_validate参数
+        # 第三步：创建SmartHeaderProcessor来读取完整数据（只有在需要读取完整数据时才创建）
+        logger.info(f"📂 [DEBUG] process_excel_file: 开始创建 SmartHeaderProcessor（用于读取完整数据）")
+        load_timeout = excel_processing_timeout_seconds
+        read_timeout = excel_processing_timeout_seconds
+        
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+        
+        def _create_processor():
+            """在后台线程中创建 SmartHeaderProcessor"""
+            try:
+                return SmartHeaderProcessor(
+                    filepath, 
+                    sheet_name, 
+                    load_timeout=load_timeout, 
+                    read_timeout=read_timeout,
+                    debug_print_header_analysis=debug_print_header_analysis,
+                    max_file_size_mb=max_file_size_mb,
+                    max_rows=max_rows
+                )
+            except Exception as e:
+                logger.error(f"创建 SmartHeaderProcessor 失败: {e}")
+                raise
+        
+        try:
+            # 使用总超时时间（excel_processing_timeout_seconds）来保护整个初始化过程
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_create_processor)
+                try:
+                    processor = future.result(timeout=excel_processing_timeout_seconds)
+                    logger.info("✅ [DEBUG] process_excel_file: SmartHeaderProcessor 创建完成")
+                except FutureTimeoutError:
+                    logger.error(f"创建 SmartHeaderProcessor 超时: {filepath} (超时时间: {excel_processing_timeout_seconds}秒)")
+                    future.cancel()
+                    error_msg = f"Excel文件处理超时（{excel_processing_timeout_seconds}秒）: {filepath}"
+                    logger.error(f"❌ {error_msg}")
+                    return ExcelProcessResult(
+                        success=False,
+                        header_analysis=analysis,  # 保留已完成的LLM分析结果
+                        processed_file_path=None,
+                        metadata_file_path=None,
+                        column_names=[],
+                        column_metadata={},
+                        row_count=0,
+                        error_message=error_msg
+                    )
+        except TimeoutError as e:
+            error_msg = f"Excel文件加载超时: {str(e)}"
+            logger.error(f"❌ {error_msg}")
+            return ExcelProcessResult(
+                success=False,
+                header_analysis=analysis,  # 保留已完成的LLM分析结果
+                processed_file_path=None,
+                metadata_file_path=None,
+                column_names=[],
+                column_metadata={},
+                row_count=0,
+                error_message=error_msg
+            )
+        
+        # 第四步：使用SmartHeaderProcessor读取完整数据并转换为DataFrame
+        logger.info("📊 开始读取完整数据并转换为DataFrame...")
+        df, _, column_metadata, _ = processor.to_dataframe(
+            analysis=analysis,  # 使用已完成的LLM分析结果
+            use_llm_validate=False,  # 不再需要LLM分析，因为已经完成了
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model=llm_model,
-            preprocessing_timeout=preprocessing_timeout
+            preprocessing_timeout=preprocessing_timeout,
+            thinking_callback=thinking_callback
         )
+        logger.info("✅ 完整数据读取完成")
         processor.close()
         
         # 生成输出文件名
@@ -1592,12 +2315,13 @@ def process_excel_file(
         )
 
 
-def get_sheet_names(filepath: str, timeout: int = 10) -> List[str]:
+def get_sheet_names(filepath: str, timeout: int = 10, max_file_size_mb: Optional[int] = None, max_rows: Optional[int] = None) -> List[str]:
     """获取Excel文件的所有工作表名称（带超时保护）
     
     Args:
         filepath: Excel文件路径
         timeout: 超时时间（秒），默认10秒
+        max_file_size_mb: 最大文件大小（MB），如果为None则使用默认值
     
     Returns:
         工作表名称列表，如果超时或出错则返回空列表
@@ -1605,23 +2329,54 @@ def get_sheet_names(filepath: str, timeout: int = 10) -> List[str]:
     import threading
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
     
+    logger.info(f"📋 [DEBUG] get_sheet_names: 开始获取工作表名称，文件: {os.path.basename(filepath)}, 超时: {timeout}秒")
+    print(f"🔍 [DEBUG] get_sheet_names: 开始获取工作表名称（使用print输出）")
+    sys.stdout.flush()
+    
     def _load_sheets():
         """在后台线程中加载工作表名称"""
         try:
+            # 文件预检查（基础检查 + ZIP验证）
+            _validate_excel_file_basic(filepath, max_file_size_mb=max_file_size_mb)
+            file_ext = Path(filepath).suffix.lower()
+            if file_ext == '.xlsx':
+                _validate_xlsx_format(filepath, timeout=0.5)
+                # 行数检查（超过配置的最大行数直接拒绝）
+                try:
+                    max_rows_value = max_rows if max_rows is not None else 10000
+                    _validate_excel_row_count(filepath, sheet_name=None, max_rows=max_rows_value, timeout=5.0)
+                except ValueError as row_error:
+                    # 捕获行数检查异常，记录警告但不抛出（get_sheet_names 返回空列表表示失败）
+                    if "行数过多" in str(row_error) or "超过限制" in str(row_error):
+                        logger.warning(f"⚠️ Excel文件行数超过限制，无法获取工作表列表: {str(row_error)}")
+                        return []  # 返回空列表表示失败
+                    raise
+            
+            logger.info(f"📂 [DEBUG] get_sheet_names: 开始加载工作簿...")
+            print(f"🔍 [DEBUG] get_sheet_names: 开始加载工作簿（使用print输出）")
+            sys.stdout.flush()
             wb = load_workbook(filepath)
+            logger.info(f"✅ [DEBUG] get_sheet_names: 工作簿加载完成")
+            print(f"🔍 [DEBUG] get_sheet_names: 工作簿加载完成（使用print输出）")
+            sys.stdout.flush()
             sheets = wb.sheetnames
+            logger.info(f"📋 [DEBUG] get_sheet_names: 获取到工作表: {sheets}")
             wb.close()
+            logger.info(f"✅ [DEBUG] get_sheet_names: 工作簿已关闭")
             return sheets
         except Exception as e:
-            logger.warning(f"读取Excel工作表失败: {filepath}, 错误: {e}")
+            logger.warning(f"❌ [DEBUG] get_sheet_names: 读取Excel工作表失败: {filepath}, 错误: {e}", exc_info=True)
             return []
     
     try:
         # 使用线程池执行，带超时保护
+        logger.info(f"🔄 [DEBUG] get_sheet_names: 准备在线程池中执行...")
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_load_sheets)
             try:
+                logger.info(f"⏳ [DEBUG] get_sheet_names: 等待结果，超时时间: {timeout}秒...")
                 sheets = future.result(timeout=timeout)
+                logger.info(f"✅ [DEBUG] get_sheet_names: 获取工作表名称成功: {sheets}")
                 return sheets if sheets else []
             except FutureTimeoutError:
                 logger.error(f"获取Excel工作表名称超时: {filepath} (超时时间: {timeout}秒)")

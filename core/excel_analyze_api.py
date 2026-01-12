@@ -8,15 +8,19 @@ Excel智能分析API
 
 import json
 import os
+import sys
 import time
 import uuid
 import random
 import shutil
 import logging
+import queue
+import threading
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Generator
 
 import openai
+
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -396,7 +400,7 @@ async def analyze_excel(
     sheet_name: Optional[str] = None,
     auto_analysis: bool = True,
     analysis_prompt: Optional[str] = None,
-    stream: bool = False,
+    stream: bool = True,  # 默认启用流式输出
     temperature: float = DEFAULT_TEMPERATURE,
     llm_api_key: Optional[str] = None,
     llm_base_url: Optional[str] = None,
@@ -424,7 +428,7 @@ async def analyze_excel(
     - sheet_name: 工作表名称（可选，默认第一个）
     - auto_analysis: 是否自动分析（可选，默认True）
     - analysis_prompt: 自定义分析提示词（可选）
-    - stream: 是否流式返回（可选，默认False，当前不支持流式）
+    - stream: 是否流式返回（可选，默认True，启用流式输出）
     - analysis_api_url: 数据分析API地址（必填）
     - analysis_model: 数据分析模型名称（必填）
     - analysis_api_key: 数据分析API密钥（可选）
@@ -457,7 +461,8 @@ async def analyze_excel(
         if use_llm_validate and not api_key:
             use_llm_validate = False  # 没有API key则不进行LLM验证
         
-        # 处理Excel文件（先规则分析，再用LLM验证）
+        # 处理Excel文件
+        # 注意：这里没有 max_file_size_mb 参数，因为文件已经在 validate_excel_file 中验证过大小
         process_result = process_excel_file(
             filepath=excel_path,
             output_dir=workspace_dir,
@@ -465,7 +470,8 @@ async def analyze_excel(
             use_llm_validate=use_llm_validate,
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
-            llm_model=llm_model
+            llm_model=llm_model,
+            max_file_size_mb=None  # 使用默认值，因为文件大小已在 validate_excel_file 中验证
         )
         
         if not process_result.success:
@@ -634,7 +640,8 @@ async def process_excel_only(
         if use_llm_validate and not api_key:
             use_llm_validate = False
         
-        # 处理Excel文件（先规则分析，再用LLM验证）
+        # 处理Excel文件
+        # 注意：这里没有 max_file_size_mb 参数，因为文件已经在 validate_excel_file 中验证过大小
         process_result = process_excel_file(
             filepath=excel_path,
             output_dir=workspace_dir,
@@ -642,7 +649,8 @@ async def process_excel_only(
             use_llm_validate=use_llm_validate,
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
-            llm_model=llm_model
+            llm_model=llm_model,
+            max_file_size_mb=None  # 使用默认值，因为文件大小已在 validate_excel_file 中验证
         )
         
         if not process_result.success:
@@ -1038,6 +1046,7 @@ def analyze_excel_stream(
     debug_print_header_analysis: bool = False,  # 是否在流式输出中打印表头分析LLM响应（用于调试）
     max_file_size_mb: Optional[int] = None,  # 最大文件大小（MB），如果为None则使用默认值
     excel_processing_timeout: Optional[int] = None,  # Excel处理超时时间（秒），在LLM分析之前
+    max_rows: Optional[int] = None,  # 最大行数，如果为None则使用默认值10000
 ) -> Generator[str, None, None]:
     """
     Excel智能分析函数 - 流式版本
@@ -1119,19 +1128,51 @@ def analyze_excel_stream(
     # === 静默处理：保存文件 ===
     try:
         excel_path = os.path.join(workspace_dir, filename)
+        logger.info(f"📝 [DEBUG] 开始保存文件到: {excel_path}")
         with open(excel_path, "wb") as f:
             f.write(file_content)
+        logger.info(f"✅ [DEBUG] 文件保存完成: {excel_path}")
+        
+        # 打印最初传入的Excel原始数据
+        logger.info(f"📊 [DEBUG] 准备打印Excel原始数据: {excel_path}")
+        from ..excel_processor import print_excel_raw_data
+        logger.info(f"🔄 [DEBUG] 调用 print_excel_raw_data 函数...")
+        print("🔍 [DEBUG] 调用 print_excel_raw_data 前（使用print输出）")
+        sys.stdout.flush()
+        try:
+            print_excel_raw_data(excel_path, sheet_name=sheet_name)
+            print("🔍 [DEBUG] print_excel_raw_data 函数已返回（使用print输出）")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"❌ [DEBUG] print_excel_raw_data 调用异常: {e}（使用print输出）")
+            sys.stdout.flush()
+            raise
+        logger.info(f"✅ [DEBUG] print_excel_raw_data 函数已返回")
+        logger.info(f"✅ [DEBUG] Excel原始数据打印完成，准备继续执行后续代码")
     except Exception as e:
+        logger.error(f"❌ [DEBUG] 文件保存或打印失败: {str(e)}", exc_info=True)
         yield f"❌ 文件保存失败: {str(e)}\n"
         return
     
+    logger.info(f"🚀 [DEBUG] 文件保存和打印完成，准备进入阶段0: LLM表头分析")
     # === 阶段0: LLM表头分析 ===
+    logger.info(f"📝 [DEBUG] 准备yield阶段0标题")
     yield "🤖 **阶段0: LLM智能分析表格结构**\n\n"
+    logger.info(f"✅ [DEBUG] 阶段0标题已yield")
+    logger.info(f"📝 [DEBUG] 准备yield文件大小信息")
+    yield f"📊 文件大小: {file_size / 1024 / 1024:.1f} MB\n"
+    logger.info(f"✅ [DEBUG] 文件大小信息已yield")
+    logger.info(f"📝 [DEBUG] 准备yield等待提示")
+    yield "⏳ 正在加载Excel文件并分析表头结构，这可能需要一些时间，请耐心等待...\n\n"
+    logger.info(f"✅ [DEBUG] 等待提示已yield")
     
+    logger.info(f"🔑 [DEBUG] 开始检查LLM配置...")
     api_key = llm_api_key if llm_api_key is not None else EXCEL_LLM_API_KEY
     actual_use_llm_validate = use_llm_validate and bool(api_key)
+    logger.info(f"🔑 [DEBUG] LLM配置检查完成 - use_llm_validate: {actual_use_llm_validate}, api_key存在: {bool(api_key)}")
     
     try:
+        # 处理Excel文件
         process_result = process_excel_file(
             filepath=excel_path,
             output_dir=workspace_dir,
@@ -1140,7 +1181,11 @@ def analyze_excel_stream(
             llm_api_key=llm_api_key,
             llm_base_url=llm_base_url,
             llm_model=llm_model,
-            excel_processing_timeout=excel_processing_timeout
+            excel_processing_timeout=excel_processing_timeout,
+            debug_print_header_analysis=debug_print_header_analysis,
+            thinking_callback=None,  # 不输出 thinking 内容
+            max_file_size_mb=max_file_size_mb,  # 传递文件大小限制
+            max_rows=max_rows  # 传递最大行数限制
         )
         
         if not process_result.success:
@@ -1193,6 +1238,7 @@ def analyze_excel_stream(
         prompt = analysis_prompt or DEFAULT_EXCEL_ANALYSIS_PROMPT
         
         # 调用流式数据分析
+        consumer_disconnected = False
         for chunk in run_data_analysis_stream(
             workspace_dir=workspace_dir,
             thread_id=current_thread_id,
@@ -1203,7 +1249,12 @@ def analyze_excel_stream(
             analysis_api_url=analysis_api_url,
             analysis_api_key=analysis_api_key
         ):
-            yield chunk
+            try:
+                yield chunk
+            except Exception as e:
+                # 捕获 yield 异常（通常是连接断开）
+                logger.warning(f"⚠️ [DEBUG] yield 时连接断开: {e}")
+                break
     else:
         yield "ℹ️ 已跳过自动分析（auto_analysis=False）\n"
     

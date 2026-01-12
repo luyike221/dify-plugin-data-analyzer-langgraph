@@ -5,6 +5,7 @@ LangGraph Analyzer API
 """
 
 import os
+import sys
 import logging
 from typing import Dict, Any, List, Optional, Generator
 
@@ -230,7 +231,6 @@ def analyze_excel_with_langgraph(
         流式输出的字符串块
     """
     # 导入必要的模块
-    from ..excel_processor import process_excel_file, get_sheet_names
     from ..storage import storage
     from ..utils import get_thread_workspace
     from ..config import DEFAULT_EXCEL_ANALYSIS_PROMPT, EXCEL_LLM_API_KEY
@@ -268,10 +268,21 @@ def analyze_excel_with_langgraph(
         
         yield f"📁 文件已保存: {filename}\n\n"
         
-        # 获取工作表
-        available_sheets = get_sheet_names(excel_path)
-        if available_sheets:
-            yield f"📋 可用工作表: {', '.join(available_sheets)}\n"
+        # 打印最初传入的Excel原始数据
+        logger.info(f"📊 [DEBUG] [LangGraph] 准备打印Excel原始数据: {excel_path}")
+        print("🔍 [DEBUG] [LangGraph] 调用 print_excel_raw_data 前（使用print输出）")
+        import sys
+        sys.stdout.flush()
+        from ..excel_processor import print_excel_raw_data
+        try:
+            print_excel_raw_data(excel_path, sheet_name=sheet_name)
+            print("🔍 [DEBUG] [LangGraph] print_excel_raw_data 函数已返回（使用print输出）")
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"❌ [DEBUG] [LangGraph] print_excel_raw_data 调用异常: {e}（使用print输出）")
+            sys.stdout.flush()
+            raise
+        logger.info(f"✅ [DEBUG] [LangGraph] print_excel_raw_data 函数已返回")
         
         # 处理表头
         api_key = llm_api_key if llm_api_key else EXCEL_LLM_API_KEY
@@ -279,6 +290,12 @@ def analyze_excel_with_langgraph(
         
         yield "🔍 正在分析表头结构...\n"
         
+        import threading
+        
+        # 导入必要的模块
+        from ..excel_processor import process_excel_file
+        
+        # 处理Excel文件
         process_result = process_excel_file(
             filepath=excel_path,
             output_dir=workspace_dir,
@@ -288,7 +305,10 @@ def analyze_excel_with_langgraph(
             llm_base_url=llm_base_url,
             llm_model=llm_model,
             preprocessing_timeout=preprocessing_timeout,
-            excel_processing_timeout=excel_processing_timeout
+            excel_processing_timeout=excel_processing_timeout,
+            debug_print_header_analysis=debug_print_header_analysis,
+            thinking_callback=None,  # 不输出 thinking 内容
+            max_file_size_mb=max_file_size_mb  # 传递文件大小限制
         )
         
         if not process_result.success:

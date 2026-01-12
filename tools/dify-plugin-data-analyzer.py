@@ -14,7 +14,7 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 
 # Import core functionality
 from core.excel_analyze_api import analyze_excel, analyze_excel_stream
-from core.config import DEFAULT_EXCEL_ANALYSIS_PROMPT
+from core.config import DEFAULT_EXCEL_ANALYSIS_PROMPT, EXCEL_MAX_FILE_SIZE_MB
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -311,15 +311,18 @@ class DifyPluginDataAnalyzerTool(Tool):
                 debug_print_header_analysis = debug_print_header_analysis.lower() in ("true", "1", "yes", "on")
             elif not isinstance(debug_print_header_analysis, bool):
                 debug_print_header_analysis = False
-            # 获取最大文件大小配置（默认5MB）
+            # 获取最大文件大小配置
             max_file_size_mb = credentials.get("max_file_size_mb")
             if max_file_size_mb is not None:
                 try:
                     max_file_size_mb = int(max_file_size_mb)
+                    logger.info(f"📋 从配置读取最大文件大小: {max_file_size_mb} MB")
                 except (ValueError, TypeError):
-                    max_file_size_mb = 5  # 默认值
+                    logger.warning(f"⚠️ 配置值 '{max_file_size_mb}' 无法转换为整数，使用默认值: {EXCEL_MAX_FILE_SIZE_MB} MB")
+                    max_file_size_mb = EXCEL_MAX_FILE_SIZE_MB  # 使用config中的默认值
             else:
-                max_file_size_mb = int(os.environ.get("MAX_FILE_SIZE_MB", "5"))
+                max_file_size_mb = int(os.environ.get("MAX_FILE_SIZE_MB", str(EXCEL_MAX_FILE_SIZE_MB)))
+                logger.info(f"📋 从环境变量读取最大文件大小: {max_file_size_mb} MB (未找到配置)")
             # 获取Excel处理超时配置（默认10秒）
             excel_processing_timeout = credentials.get("excel_processing_timeout")
             if excel_processing_timeout is not None:
@@ -329,6 +332,18 @@ class DifyPluginDataAnalyzerTool(Tool):
                     excel_processing_timeout = 10  # 默认值
             else:
                 excel_processing_timeout = int(os.environ.get("EXCEL_PROCESSING_TIMEOUT", "10"))
+            # 获取最大行数配置（默认10000行）
+            max_rows = credentials.get("max_rows")
+            if max_rows is not None:
+                try:
+                    max_rows = int(max_rows)
+                    logger.info(f"📋 从配置读取最大行数: {max_rows} 行")
+                except (ValueError, TypeError):
+                    logger.warning(f"⚠️ 配置值 '{max_rows}' 无法转换为整数，使用默认值: 10000 行")
+                    max_rows = 10000  # 默认值
+            else:
+                max_rows = int(os.environ.get("MAX_ROWS", "10000"))
+                logger.info(f"📋 从环境变量读取最大行数: {max_rows} 行 (未找到配置)")
         else:
             llm_api_key = os.environ.get("EXCEL_LLM_API_KEY")
             llm_base_url = os.environ.get("EXCEL_LLM_BASE_URL", "https://api.openai.com/v1/chat/completions")
@@ -344,10 +359,14 @@ class DifyPluginDataAnalyzerTool(Tool):
             debug_print_execution_output = os.environ.get("DEBUG_PRINT_EXECUTION_OUTPUT", "true").lower() in ("true", "1", "yes", "on")
             # 获取表头分析调试配置（从环境变量，默认禁用）
             debug_print_header_analysis = os.environ.get("DEBUG_PRINT_HEADER_ANALYSIS", "false").lower() in ("true", "1", "yes", "on")
-            # 获取最大文件大小配置（从环境变量，默认5MB）
-            max_file_size_mb = int(os.environ.get("MAX_FILE_SIZE_MB", "5"))
+            # 获取最大文件大小配置（从环境变量，使用config中的默认值）
+            max_file_size_mb = int(os.environ.get("MAX_FILE_SIZE_MB", str(EXCEL_MAX_FILE_SIZE_MB)))
+            logger.info(f"📋 从环境变量读取最大文件大小: {max_file_size_mb} MB")
             # 获取Excel处理超时配置（从环境变量，默认10秒）
             excel_processing_timeout = int(os.environ.get("EXCEL_PROCESSING_TIMEOUT", "10"))
+            # 获取最大行数配置（从环境变量，默认10000行）
+            max_rows = int(os.environ.get("MAX_ROWS", "10000"))
+            logger.info(f"📋 从环境变量读取最大行数: {max_rows} 行")
         
         # 验证必选配置
         if not analysis_api_url:
@@ -497,6 +516,7 @@ class DifyPluginDataAnalyzerTool(Tool):
                 debug_print_header_analysis=debug_print_header_analysis,  # 调试：是否打印表头分析LLM响应
                 max_file_size_mb=max_file_size_mb,  # 最大文件大小（MB）
                 excel_processing_timeout=excel_processing_timeout,  # Excel处理超时时间（秒）
+                max_rows=max_rows,  # 最大行数
             ):
                 # 流式输出每个块
                 yield self.create_stream_variable_message('stream_output', chunk)
