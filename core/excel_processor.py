@@ -449,6 +449,13 @@ class SmartHeaderProcessor:
 
 {table_str}
 
+**重要说明**：
+- 表格中的"行号 | 列1 | 列2 | 列3 | ..."是标注内容，用于标识行列位置，**不是实际数据**
+- 实际数据从第一行开始，每行的第一个值（行号列）是标注，不是数据内容
+- 行号从1开始计数，对应Excel文件的实际行号
+- 列号从1开始计数，对应Excel文件的实际列号
+- None表示该单元格为空（无数据）
+
 【总列数】{max_col}
 
 ## 分析任务
@@ -1642,19 +1649,34 @@ def _get_preview_data_lightweight(filepath: str, sheet_name: str = None, max_row
                     raise ValueError("Excel文件不包含任何工作表")
                 ws = wb[wb.sheetnames[0]]
             
-            # 确定实际读取范围
-            actual_max_col = min(ws.max_column, max_cols)
-            actual_max_row = min(ws.max_row, max_rows)
-            max_col = ws.max_column  # 保存总列数
+            # 直接使用配置的行数和列数读取数据，不进行任何智能判断
+            # 空值也是重要数据，需要完整读取
+            logger.info(f"🔍 [DEBUG] _get_preview_data_lightweight: ws.max_row={ws.max_row}, ws.max_column={ws.max_column}")
+            logger.info(f"📊 [DEBUG] 直接读取指定范围: {max_rows} 行, {max_cols} 列（空值也保留）")
             
-            # 读取数据
+            # 直接使用 iter_rows 读取指定范围的数据
             data = []
-            for row in range(1, actual_max_row + 1):
-                row_data = []
-                for col in range(1, actual_max_col + 1):
-                    value = ws.cell(row, col).value
-                    row_data.append(value)
+            row_count = 0
+            
+            # 使用 iter_rows 明确指定范围，确保读取所有列（包括空值）
+            for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=max_rows, min_col=1, max_col=max_cols, values_only=True), 1):
+                # 将行数据转换为列表
+                row_data = list(row)
+                
+                # 确保每行都有 max_cols 列（不足补齐 None，超过截断）
+                while len(row_data) < max_cols:
+                    row_data.append(None)
+                row_data = row_data[:max_cols]
+                
                 data.append(row_data)
+                row_count = row_idx
+            
+            # 最大列数使用配置值
+            max_col = max_cols
+            actual_max_col = max_cols
+            
+            logger.info(f"✅ [DEBUG] _get_preview_data_lightweight: 实际读取 {row_count} 行, {actual_max_col} 列, 最大列数: {max_col}")
+            logger.info(f"🔍 [DEBUG] _get_preview_data_lightweight: ws.max_row={ws.max_row}, ws.max_column={ws.max_column}")
             
             wb.close()
             return data, max_col
@@ -1707,18 +1729,26 @@ def _analyze_header_with_llm_lightweight(preview_data: List[List[Any]], max_col:
     num_cols = len(preview_data[0]) if preview_data else 0
     num_rows = len(preview_data)
     
-    # 构建简单的表格字符串
+    # 构建表格字符串（保留原始数据值，包括None，方便大模型判断行列）
     table_str = "【Excel原始数据】（前15行，前25列）\n\n"
     table_str += "行号 | " + " | ".join([f"列{i+1}" for i in range(num_cols)]) + "\n"
     table_str += "-" * (8 + num_cols * 15) + "\n"
     
     for i, row in enumerate(preview_data, 1):
-        row_str = " | ".join([str(cell) if cell is not None else "" for cell in row])
+        # 保留原始数据值：None显示为None，其他值使用repr显示原始表示
+        row_str = " | ".join([repr(cell) if cell is not None else "None" for cell in row])
         table_str += f"  {i:2d}  | {row_str}\n"
     
     prompt = f"""你是一个Excel表格结构分析专家。请分析以下Excel表格的原始数据，识别表头结构。
 
 {table_str}
+
+**重要说明**：
+- 表格中的"行号 | 列1 | 列2 | 列3 | ..."是标注内容，用于标识行列位置，**不是实际数据**
+- 实际数据从第一行开始，每行的第一个值（行号列）是标注，不是数据内容
+- 行号从1开始计数，对应Excel文件的实际行号
+- 列号从1开始计数，对应Excel文件的实际列号
+- None表示该单元格为空（无数据）
 
 【总列数】{max_col}
 
@@ -2143,6 +2173,24 @@ def process_excel_file(
             # 其他异常继续抛出
             logger.error(f"❌ 获取Excel预览数据时发生未处理的异常: {error_type}: {error_str}")
             raise
+        
+        # 打印表头预览数据到控制台（表格格式，保留原始数据值，方便LLM判断行列）
+        print("\n" + "="*80)
+        print("📊 表头预览数据（原始数据，用于LLM分析）")
+        print("="*80)
+        if preview_data:
+            num_cols = len(preview_data[0]) if preview_data else 0
+            print(f"行数: {len(preview_data)}, 列数: {num_cols}, 最大列数: {max_col}")
+            print("\n行号 | " + " | ".join([f"列{i+1}" for i in range(num_cols)]) + " |")
+            print("-" * (8 + num_cols * 15))
+            for i, row in enumerate(preview_data, 1):
+                # 保留原始数据值：None显示为None，其他值显示原始字符串表示
+                row_str = " | ".join([repr(cell) if cell is not None else "None" for cell in row])
+                print(f"  {i:2d}  | {row_str} |")
+        else:
+            print("（预览数据为空）")
+        print("="*80 + "\n")
+        sys.stdout.flush()
         
         # 第二步：使用预览数据进行LLM分析
         logger.info("🤖 开始LLM表头分析（使用预览数据）...")
