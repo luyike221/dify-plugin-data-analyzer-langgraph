@@ -852,7 +852,8 @@ def run_data_analysis_stream(
     model: str,
     temperature: float,
     analysis_api_url: str,
-    analysis_api_key: Optional[str] = None
+    analysis_api_key: Optional[str] = None,
+    debug_print_execution_output: bool = False  # 是否在流式输出中打印代码执行结果（用于调试）
 ) -> Generator[str, None, None]:
     """
     执行数据分析流程 - 流式版本
@@ -992,8 +993,10 @@ def run_data_analysis_stream(
                 yield "⏳ 正在执行代码...\n"
                 exe_output = execute_code_safe(code_str, workspace_dir)
                 
-                yield "\n📊 **执行结果:**\n"
-                yield f"```\n{exe_output}\n```\n"
+                # 根据配置决定是否输出执行结果
+                if debug_print_execution_output:
+                    yield "\n📊 **执行结果:**\n"
+                    yield f"```\n{exe_output}\n```\n"
                 
                 artifacts = tracker.diff_and_collect()
                 if artifacts:
@@ -1235,7 +1238,8 @@ def analyze_excel_stream(
             model=analysis_model,
             temperature=temperature,
             analysis_api_url=analysis_api_url,
-            analysis_api_key=analysis_api_key
+            analysis_api_key=analysis_api_key,
+            debug_print_execution_output=debug_print_execution_output
         ):
             try:
                 yield chunk

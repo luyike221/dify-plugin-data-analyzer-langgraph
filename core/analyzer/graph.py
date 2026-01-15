@@ -417,8 +417,7 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
     logger.info(f"   - 分析任务: {analysis_tasks}")
     logger.info(f"   - 首个任务: {first_task}")
     
-    # 输出分析计划
-    _push_to_request_queue(request_id, f"**分析类型：** {analysis_type}\n\n")
+    # 输出分析计划（分析类型已移除，不再流式输出）
     if analysis_tasks:
         _push_to_request_queue(request_id, "**分析计划：**\n")
         for i, task in enumerate(analysis_tasks, 1):
@@ -460,6 +459,9 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     # 当前任务：优先使用 current_task，否则使用 refined_prompt
     current_task = state.get("current_task") or state.get("refined_prompt") or state["user_prompt"]
     
+    # 获取分析任务列表（首轮时使用，包含多个分析策略）
+    analysis_tasks = state.get("analysis_tasks", [])
+    
     # 获取之前的分析结果（用于后续轮）
     all_outputs = state.get("all_execution_outputs", [])
     previous_results = None
@@ -472,6 +474,8 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     logger.info(f"   - 轮次: {round_count + 1}")
     logger.info(f"   - 首轮: {is_first_round}")
     logger.info(f"   - 当前任务: {current_task[:100]}...")
+    if is_first_round and analysis_tasks:
+        logger.info(f"   - 分析任务列表: {analysis_tasks}")
     
     # 构建 prompt（区分首轮和后续轮）
     messages = PromptTemplates.format_code_generation_prompt(
@@ -483,6 +487,7 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
         user_prompt=current_task,
         previous_results=previous_results,
         is_first_round=is_first_round,
+        analysis_tasks=analysis_tasks if is_first_round else None,  # 首轮时传递所有分析任务
     )
     
     # 输出标题
@@ -631,16 +636,7 @@ plt.rcParams['axes.unicode_minus'] = False
             except Exception as e:
                 logger.warning(f"⚠️ 检查并复制CSV文件时出错: {e}")
         
-        # 根据配置决定是否输出执行结果
-        debug_print = state.get("debug_print_execution_output", False)
-        if debug_print:
-            _push_to_request_queue(request_id, "\n✅ **代码执行完毕**\n\n")
-            _push_to_request_queue(request_id, "📊 **执行结果：**\n\n")
-            _push_to_request_queue(request_id, f"```\n{output}\n```\n\n")
-            _push_to_request_queue(request_id, "正在生成最终报告...\n\n")
-        else:
-            # 默认不显示具体执行结果
-            _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在生成最终报告...**\n\n")
+        # 代码执行结构信息已移除，不再输出
         
         # 成功后直接进入报告生成节点（跳过完整性评估）
         return {
@@ -654,13 +650,14 @@ plt.rcParams['axes.unicode_minus'] = False
         }
     else:
         logger.warning(f"❌ [Node] 代码执行失败: {output[:200]}...")
+        # 执行出错信息已移除，不再流式输出
         return {
             "phase": AnalysisPhase.ERROR_FIXING.value,
             "current_output": output,
             "execution_success": False,
             "error_message": output,
             "execution_history": [execution],
-            "stream_output": [f"\n❌ **执行出错：**\n\n```\n{output}\n```\n\n"],
+            "stream_output": [],  # 不再输出错误信息
         }
 
 
@@ -680,10 +677,11 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
     
     if retry_count > max_retries:
         logger.error(f"❌ [Node] 已达到最大重试次数 ({max_retries})")
+        # 最大重试次数提示已移除，不再流式输出
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "retry_count": retry_count,
-            "stream_output": [f"\n⚠️ 已达到最大重试次数 ({max_retries})，跳过代码执行，直接生成报告\n\n"],
+            "stream_output": [],  # 不再输出提示信息
         }
     
     # 创建 LLM 客户端
@@ -697,24 +695,16 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         column_names=state["column_names"],
     )
     
-    # 收集流式输出的列表（用于后续格式化）
-    stream_chunks = []
+    # 修复代码过程中的流式输出已移除，不再显示修复过程
     
-    def stream_callback(chunk: str):
-        """流式输出回调，收集 token（同时会通过队列实时传递）"""
-        stream_chunks.append(chunk)
-    
-    # 先输出标题（实时传递）
-    _push_to_request_queue(request_id, f"\n🔧 **正在修复代码（尝试 {retry_count}/{max_retries}）...**\n\n")
-    
-    # 流式调用 LLM 修复（每个 token 会通过队列实时传递）
+    # 非流式调用 LLM 修复（不显示修复过程）
     response = call_llm(
         client=client,
         messages=messages,
         model=state["model"],
         temperature=state["temperature"],
         stream=True,
-        stream_callback=stream_callback,
+        push_to_queue=False,  # 不流式展示修复代码过程
         request_id=request_id,
     )
     
@@ -730,31 +720,22 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
     
     if fixed_code:
         logger.info(f"✅ [Node] 成功获取修复代码，重试次数: {retry_count}")
-        # 注意：代码已经在流式调用时实时推送过了，不需要再次推送格式化代码
-        
-        # 注意：所有内容（标题、流式token）都已经在节点执行时实时推送过了
-        # stream_output 保留为空，避免重复推送
-        stream_output = []
         
         return {
             "phase": AnalysisPhase.CODE_EXECUTION.value,
             "current_code": fixed_code,
             "code_history": [fixed_code],
             "retry_count": retry_count,
-            "stream_output": stream_output,
+            "stream_output": [],  # 不再输出修复代码过程
         }
     else:
         logger.warning("⚠️ [Node] 未能从修复响应中提取代码")
-        _push_to_request_queue(request_id, f"\n\n⚠️ 无法修复代码，跳过执行，直接生成报告\n\n")
-        
-        # 注意：所有内容都已经在节点执行时实时推送过了
-        # stream_output 保留为空，避免重复推送
-        stream_output = []
+        # 无法修复代码的提示已移除，不再流式输出
         
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "retry_count": retry_count,
-            "stream_output": stream_output,
+            "stream_output": [],  # 不再输出提示信息
         }
 
 
