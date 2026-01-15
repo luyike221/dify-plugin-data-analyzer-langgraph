@@ -1192,26 +1192,14 @@ def analyze_excel_stream(
             yield f"❌ Excel处理失败: {process_result.error_message}\n"
             return
         
-        # 输出LLM分析结果
-        if process_result.header_analysis:
-            ha = process_result.header_analysis
-            yield "✅ **LLM分析结果：**\n\n"
-            yield f"- **跳过行数**: {ha.skip_rows} 行（标题/注释等无效行）\n"
-            yield f"- **表头行数**: {ha.header_rows} 行\n"
-            yield f"- **表头类型**: {'多级表头' if ha.header_type == 'multi' else '单表头'}\n"
-            yield f"- **数据起始行**: 第 {ha.data_start_row} 行\n"
-            yield f"- **数据起始列**: 第 {ha.start_col} 列（第一个表头行中第一个非空表头开始的列）\n"
-            yield f"- **置信度**: {ha.confidence}\n"
-            if ha.reason:
-                yield f"- **分析说明**: {ha.reason}\n"
-            yield "\n"
-            
-            # 根据调试开关决定是否输出LLM原始响应
-            if debug_print_header_analysis and process_result.llm_analysis_response:
-                yield "\n📋 **LLM表头分析原始响应（调试信息）：**\n\n"
-                yield "```json\n"
-                yield process_result.llm_analysis_response
-                yield "\n```\n\n"
+        # 表头分析完成信息已移除，不再输出
+        
+        # 根据调试开关决定是否输出LLM原始响应
+        if debug_print_header_analysis and process_result.llm_analysis_response:
+            yield "\n📋 **LLM表头分析原始响应（调试信息）：**\n\n"
+            yield "```json\n"
+            yield process_result.llm_analysis_response
+            yield "\n```\n\n"
         
     except Exception as e:
         yield f"❌ 表头分析失败: {str(e)}\n"

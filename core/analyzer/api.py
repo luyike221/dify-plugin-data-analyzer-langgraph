@@ -315,7 +315,7 @@ def analyze_excel_with_langgraph(
             yield f"❌ Excel 处理失败: {process_result.error_message}\n"
             return
         
-        yield f"✅ 表头分析完成，数据行数: {process_result.row_count}\n\n"
+        # 表头分析完成信息已移除，不再输出
         
         # 根据调试开关决定是否输出LLM分析响应
         if debug_print_header_analysis and process_result.llm_analysis_response:

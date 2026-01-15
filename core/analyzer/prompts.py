@@ -77,6 +77,10 @@ class PromptTemplates:
 
 1. **简单查询**：`analysis_tasks` 只包含一个任务，`first_task` 就是用户问题本身
 2. **概述/具体分析**：将需求分解为多个可执行的任务
+3. **澄清规则**：
+   - 正常情况下，`needs_clarification` 应设为 `false`，直接进行数据分析
+   - 只有当用户问题**严重偏离数据分析或标的内容**（如询问天气、聊天、与数据完全无关的问题）时，才设置 `needs_clarification: true` 并提供 `clarification_message`
+   - 对于模糊或不明确的数据分析需求，应尽量理解并直接进行分析，而不是要求澄清
 """
 
     INTENT_ANALYSIS_USER = """{data_info}

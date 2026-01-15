@@ -387,14 +387,15 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
             "first_task": state["user_prompt"],
         }
     
-    # 判断是否需要澄清
+    # 判断是否需要澄清（仅在问题严重偏离数据分析或标的内容时）
     is_relevant = intent_result.get("is_relevant", True)
     needs_clarification = intent_result.get("needs_clarification", False)
     
-    if not is_relevant or needs_clarification:
+    # 只在问题与数据完全不相关时才进行澄清
+    if not is_relevant:
         clarification_msg = intent_result.get(
             "clarification_message",
-            "您的分析需求不够明确，请提供更具体的要求。"
+            "您的问题与当前数据分析无关，请提供与数据相关的问题。"
         )
         _push_to_request_queue(request_id, f"\n\n❓ **需要澄清**\n\n{clarification_msg}\n\n")
         return {
@@ -490,13 +491,14 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     else:
         _push_to_request_queue(request_id, f"\n📝 **正在生成第 {round_count + 1} 轮分析代码...**\n\n")
     
-    # 流式调用 LLM
+    # 流式调用 LLM（但不流式展示代码内容）
     response = call_llm(
         client=client,
         messages=messages,
         model=state["model"],
         temperature=state["temperature"],
         stream=True,
+        push_to_queue=False,  # 不流式展示代码生成过程
         request_id=request_id,
     )
     
@@ -635,18 +637,19 @@ plt.rcParams['axes.unicode_minus'] = False
             _push_to_request_queue(request_id, "\n✅ **代码执行完毕**\n\n")
             _push_to_request_queue(request_id, "📊 **执行结果：**\n\n")
             _push_to_request_queue(request_id, f"```\n{output}\n```\n\n")
-            _push_to_request_queue(request_id, "正在评估分析完整性...\n\n")
+            _push_to_request_queue(request_id, "正在生成最终报告...\n\n")
         else:
             # 默认不显示具体执行结果
-            _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在评估分析完整性...**\n\n")
+            _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在生成最终报告...**\n\n")
         
-        # 成功后进入分析完整性评估节点（新流程）
+        # 成功后直接进入报告生成节点（跳过完整性评估）
         return {
-            "phase": AnalysisPhase.EVALUATE_COMPLETENESS.value,
+            "phase": AnalysisPhase.REPORT_GENERATION.value,
             "current_output": output,
             "execution_success": True,
             "execution_history": [execution],
             "round_count": state.get("round_count", 0) + 1,
+            "all_execution_outputs": state.get("all_execution_outputs", []) + [output],
             "stream_output": [],
         }
     else:
@@ -981,16 +984,16 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
 # 条件路由函数
 # ============================================================================
 
-def route_after_execution(state: AnalysisState) -> Literal["fix_code", "evaluate_completeness"]:
+def route_after_execution(state: AnalysisState) -> Literal["fix_code", "generate_report"]:
     """
     执行后路由决策
     
     根据执行结果决定下一步：
-    - 执行成功 → 评估分析完整性（新流程）
+    - 执行成功 → 直接生成报告（跳过完整性评估）
     - 执行失败 → 修复代码
     """
     if state.get("execution_success", False):
-        return "evaluate_completeness"
+        return "generate_report"
     else:
         return "fix_code"
 
@@ -1031,14 +1034,12 @@ def create_analysis_graph() -> StateGraph:
     """
     创建数据分析工作流图
     
-    工作流结构（支持多轮分析）：
+    工作流结构（已跳过完整性评估）：
     
     START → analyze_intent ─┬─(需要澄清)─→ END
                             │
-                            └─(可以分析)─→ generate_code → execute_code ─┬─(成功)─→ evaluate_completeness ─┬─(需要更多)─→ generate_code (循环)
-                                              ↑                          │                                 │
-                                              │                          │                                 └─(完成)─→ generate_report → END
-                                              │                          │
+                            └─(可以分析)─→ generate_code → execute_code ─┬─(成功)─→ generate_report → END
+                                              ↑                          │
                                               │                          └─(失败)─→ fix_code ─┬─(有修复)─→ execute_code
                                               │                                              │
                                               └──────────────────────────────────────────────┴─(无法修复)─→ generate_report
@@ -1054,7 +1055,7 @@ def create_analysis_graph() -> StateGraph:
     workflow.add_node("generate_code", generate_code_node)
     workflow.add_node("execute_code", execute_code_node)
     workflow.add_node("fix_code", fix_code_node)
-    workflow.add_node("evaluate_completeness", evaluate_completeness_node)  # 新增：分析完整性评估节点
+    workflow.add_node("evaluate_completeness", evaluate_completeness_node)  # 保留节点（已不再使用，跳过完整性评估）
     workflow.add_node("generate_report", generate_report_node)
     
     # 添加边
@@ -1093,13 +1094,13 @@ def create_analysis_graph() -> StateGraph:
     # 处理需要澄清的情况（直接结束）
     # 注意：analyze_intent 节点如果返回 USER_CLARIFICATION_NEEDED，会通过条件边路由到 END
     
-    # execute_code → fix_code 或 evaluate_completeness（新流程）
+    # execute_code → fix_code 或 generate_report（跳过完整性评估）
     workflow.add_conditional_edges(
         "execute_code",
         route_after_execution,
         {
             "fix_code": "fix_code",
-            "evaluate_completeness": "evaluate_completeness",  # 成功后去评估节点
+            "generate_report": "generate_report",  # 成功后直接生成报告
         }
     )
     
@@ -1114,6 +1115,7 @@ def create_analysis_graph() -> StateGraph:
     )
     
     # evaluate_completeness → generate_code (需要更多分析) 或 generate_report (完成)
+    # 注意：此节点已不再被路由到，保留仅用于兼容性
     workflow.add_conditional_edges(
         "evaluate_completeness",
         route_after_evaluation,
