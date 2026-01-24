@@ -333,19 +333,19 @@ def is_execution_error(output: str) -> bool:
 # 工作流节点函数
 # ============================================================================
 
-def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
+def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
     """
-    意图分析节点
+    策略制定节点
     
-    职责：理解用户需求，制定分析计划
+    职责：制定数据分析策略，包括分析方法选择、任务分解、优先级排序
     """
-    logger.info("🔍 [Node] 意图分析节点开始执行")
+    logger.info("🎯 [Node] 策略制定节点开始执行")
     
     request_id = state.get("request_id", "")
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
-    # 构建意图分析 prompt
-    messages = PromptTemplates.format_intent_analysis_prompt(
+    # 构建策略制定 prompt
+    messages = PromptTemplates.format_strategy_planning_prompt(
         csv_path=state["csv_path"],
         row_count=state["row_count"],
         column_names=state["column_names"],
@@ -366,7 +366,7 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
     )
     
     logger.info("=" * 80)
-    logger.info("🔍 [意图分析] LLM 完整响应:")
+    logger.info("🎯 [策略制定] LLM 完整响应:")
     logger.info(response)
     logger.info("=" * 80)
     
@@ -375,68 +375,76 @@ def analyze_intent_node(state: AnalysisState) -> Dict[str, Any]:
     try:
         json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
         json_str = json_match.group(1) if json_match else response
-        intent_result = json.loads(json_str.strip())
+        strategy_result = json.loads(json_str.strip())
     except (json.JSONDecodeError, AttributeError) as e:
-        logger.warning(f"⚠️ [Node] 无法解析意图分析结果: {e}")
-        intent_result = {
+        logger.warning(f"⚠️ [Node] 无法解析策略制定结果: {e}")
+        strategy_result = {
             "is_relevant": True,
             "needs_clarification": False,
-            "analysis_type": "overview",
-            "refined_prompt": state["user_prompt"],
-            "analysis_tasks": ["数据概览分析"],
+            "type": "overview",
+            "refined_query": state["user_prompt"],
+            "tasks": ["数据概览分析"],
             "first_task": state["user_prompt"],
         }
     
     # 判断是否需要澄清
-    is_relevant = intent_result.get("is_relevant", True)
-    needs_clarification = intent_result.get("needs_clarification", False)
+    is_relevant = strategy_result.get("is_relevant", True)
+    needs_clarification = strategy_result.get("needs_clarification", False)
     
     if not is_relevant or needs_clarification:
-        clarification_msg = intent_result.get(
+        clarification_msg = strategy_result.get(
             "clarification_message",
             "您的分析需求不够明确，请提供更具体的要求。"
         )
         _push_to_request_queue(request_id, f"\n\n❓ **需要澄清**\n\n{clarification_msg}\n\n")
         return {
             "phase": AnalysisPhase.USER_CLARIFICATION_NEEDED.value,
-            "needs_clarification": True,
-            "clarification_message": clarification_msg,
-            "intent_analysis_result": response,
+            "analysis_strategy": {
+                "type": "",
+                "refined_query": state["user_prompt"],
+                "tasks": [],
+                "current_task": "",
+                "completed_tasks": [],
+                "needs_clarification": True,
+                "clarification_message": clarification_msg,
+            },
             "stream_output": [],
         }
     
-    # 提取分析计划
-    analysis_type = intent_result.get("analysis_type", "overview")
-    refined_prompt = intent_result.get("refined_prompt", state["user_prompt"])
-    analysis_tasks = intent_result.get("analysis_tasks", [refined_prompt])
-    first_task = intent_result.get("first_task", analysis_tasks[0] if analysis_tasks else refined_prompt)
+    # 构建统一策略对象
+    analysis_type = strategy_result.get("type", "overview")
+    refined_query = strategy_result.get("refined_query", state["user_prompt"])
+    tasks = strategy_result.get("tasks", [refined_query])
+    first_task = strategy_result.get("first_task", tasks[0] if tasks else refined_query)
     
-    logger.info(f"✅ [Node] 意图分析完成")
+    strategy = {
+        "type": analysis_type,
+        "refined_query": refined_query,
+        "tasks": tasks,
+        "current_task": first_task,
+        "completed_tasks": [],
+        "needs_clarification": False,
+        "clarification_message": None,
+    }
+    
+    logger.info(f"✅ [Node] 策略制定完成")
     logger.info(f"   - 分析类型: {analysis_type}")
-    logger.info(f"   - 分析任务: {analysis_tasks}")
+    logger.info(f"   - 分析任务: {tasks}")
     logger.info(f"   - 首个任务: {first_task}")
     
-    # 输出分析计划
+    # 输出分析策略
     _push_to_request_queue(request_id, f"**分析类型：** {analysis_type}\n\n")
-    if analysis_tasks:
-        _push_to_request_queue(request_id, "**分析计划：**\n")
-        for i, task in enumerate(analysis_tasks, 1):
+    if tasks:
+        _push_to_request_queue(request_id, "**分析策略：**\n")
+        for i, task in enumerate(tasks, 1):
             _push_to_request_queue(request_id, f"{i}. {task}\n")
         _push_to_request_queue(request_id, "\n")
     
     return {
         "phase": AnalysisPhase.CODE_GENERATION.value,
-        "refined_prompt": refined_prompt,
-        "analysis_type": analysis_type,
-        "analysis_tasks": analysis_tasks,
-        "current_task": first_task,
-        "intent_analysis_result": response,
-        "needs_clarification": False,
+        "analysis_strategy": strategy,
         "messages": messages + [{"role": "assistant", "content": response}],
         "stream_output": [],
-        # 兼容旧字段
-        "analysis_strategy": "",
-        "research_directions": analysis_tasks,
     }
 
 
@@ -456,8 +464,9 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     round_count = state.get("round_count", 0)
     is_first_round = round_count == 0
     
-    # 当前任务：优先使用 current_task，否则使用 refined_prompt
-    current_task = state.get("current_task") or state.get("refined_prompt") or state["user_prompt"]
+    # 从策略对象获取当前任务
+    strategy = state.get("analysis_strategy", {})
+    current_task = strategy.get("current_task") or strategy.get("refined_query") or state["user_prompt"]
     
     # 获取之前的分析结果（用于后续轮）
     all_outputs = state.get("all_execution_outputs", [])
@@ -794,13 +803,18 @@ def evaluate_completeness_node(state: AnalysisState) -> Dict[str, Any]:
     previous_outputs = state.get("all_execution_outputs", [])
     current_output = state.get("current_output", "")
     
-    # 构建评估 prompt（使用新格式）
+    # 从策略对象获取任务信息
+    strategy = state.get("analysis_strategy", {})
+    analysis_tasks = strategy.get("tasks", [])
+    completed_tasks = strategy.get("completed_tasks", [])
+    
+    # 构建评估 prompt
     messages = PromptTemplates.format_evaluate_completeness_prompt(
         user_prompt=state["user_prompt"],
-        analysis_tasks=state.get("analysis_tasks", []),
+        analysis_tasks=analysis_tasks,
         current_output=current_output,
         previous_outputs=previous_outputs,
-        completed_tasks=state.get("completed_tasks", []),
+        completed_tasks=completed_tasks,
         current_round=current_round,
         max_rounds=max_rounds,
     )
@@ -863,30 +877,33 @@ def evaluate_completeness_node(state: AnalysisState) -> Dict[str, Any]:
         _push_to_request_queue(request_id, f"\n🔄 **继续分析（第 {current_round + 1} 轮）**\n\n")
         _push_to_request_queue(request_id, f"**任务：** {next_task}\n\n")
         
+        # 更新策略对象
+        strategy = state.get("analysis_strategy", {}).copy()
+        strategy["current_task"] = next_task
+        strategy["completed_tasks"] = completed_tasks_new
+        
         return {
             "phase": AnalysisPhase.CODE_GENERATION.value,
             "need_more_analysis": True,
-            "current_task": next_task,  # 更新当前任务
-            "completed_tasks": completed_tasks_new,  # 已完成的任务
+            "analysis_strategy": strategy,
             "all_execution_outputs": [current_output],  # 累积执行输出
             "stream_output": [],
-            # 兼容旧字段
-            "next_analysis_direction": next_task,
-            "completed_directions": completed_tasks_new,
         }
     else:
         # 分析已完成
         logger.info("✅ 分析已完成，进入报告生成")
         _push_to_request_queue(request_id, f"\n✅ **分析完成**（共 {current_round} 轮），正在生成报告...\n\n")
         
+        # 更新策略对象
+        strategy = state.get("analysis_strategy", {}).copy()
+        strategy["completed_tasks"] = completed_tasks_new
+        
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "need_more_analysis": False,
-            "completed_tasks": completed_tasks_new,
+            "analysis_strategy": strategy,
             "all_execution_outputs": [current_output],  # 累积执行输出
             "stream_output": [],
-            # 兼容旧字段
-            "completed_directions": completed_tasks_new,
         }
 
 
@@ -901,8 +918,9 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
     request_id = state.get("request_id", "")
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
-    # 获取分析类型和轮次
-    analysis_type = state.get("analysis_type", "overview")
+    # 从策略对象获取分析类型和轮次
+    strategy = state.get("analysis_strategy", {})
+    analysis_type = strategy.get("type", "overview")
     round_count = state.get("round_count", 1)
     
     logger.info(f"   - 分析类型: {analysis_type}")
@@ -1033,15 +1051,15 @@ def create_analysis_graph() -> StateGraph:
     
     工作流结构（支持多轮分析）：
     
-    START → analyze_intent ─┬─(需要澄清)─→ END
-                            │
-                            └─(可以分析)─→ generate_code → execute_code ─┬─(成功)─→ evaluate_completeness ─┬─(需要更多)─→ generate_code (循环)
-                                              ↑                          │                                 │
-                                              │                          │                                 └─(完成)─→ generate_report → END
-                                              │                          │
-                                              │                          └─(失败)─→ fix_code ─┬─(有修复)─→ execute_code
-                                              │                                              │
-                                              └──────────────────────────────────────────────┴─(无法修复)─→ generate_report
+    START → plan_strategy ─┬─(需要澄清)─→ END
+                           │
+                           └─(可以分析)─→ generate_code → execute_code ─┬─(成功)─→ evaluate_completeness ─┬─(需要更多)─→ generate_code (循环)
+                                             ↑                          │                                 │
+                                             │                          │                                 └─(完成)─→ generate_report → END
+                                             │                          │
+                                             │                          └─(失败)─→ fix_code ─┬─(有修复)─→ execute_code
+                                             │                                              │
+                                             └──────────────────────────────────────────────┴─(无法修复)─→ generate_report
     
     Returns:
         编译后的 StateGraph
@@ -1050,20 +1068,20 @@ def create_analysis_graph() -> StateGraph:
     workflow = StateGraph(AnalysisState)
     
     # 添加节点
-    workflow.add_node("analyze_intent", analyze_intent_node)
+    workflow.add_node("plan_strategy", plan_strategy_node)
     workflow.add_node("generate_code", generate_code_node)
     workflow.add_node("execute_code", execute_code_node)
     workflow.add_node("fix_code", fix_code_node)
-    workflow.add_node("evaluate_completeness", evaluate_completeness_node)  # 新增：分析完整性评估节点
+    workflow.add_node("evaluate_completeness", evaluate_completeness_node)  # 分析完整性评估节点
     workflow.add_node("generate_report", generate_report_node)
     
     # 添加边
-    # START → analyze_intent
-    workflow.add_edge(START, "analyze_intent")
+    # START → plan_strategy
+    workflow.add_edge(START, "plan_strategy")
     
-    # analyze_intent → generate_code 或 END（需要澄清）
-    def route_after_intent(state: AnalysisState) -> Literal["generate_code", "end"]:
-        """意图分析后的路由决策"""
+    # plan_strategy → generate_code 或 END（需要澄清）
+    def route_after_strategy(state: AnalysisState) -> Literal["generate_code", "end"]:
+        """策略制定后的路由决策"""
         phase = state.get("phase", "")
         if phase == AnalysisPhase.CODE_GENERATION.value:
             return "generate_code"
@@ -1072,8 +1090,8 @@ def create_analysis_graph() -> StateGraph:
             return "end"
     
     workflow.add_conditional_edges(
-        "analyze_intent",
-        route_after_intent,
+        "plan_strategy",
+        route_after_strategy,
         {
             "generate_code": "generate_code",
             "end": END,
@@ -1091,7 +1109,7 @@ def create_analysis_graph() -> StateGraph:
     )
     
     # 处理需要澄清的情况（直接结束）
-    # 注意：analyze_intent 节点如果返回 USER_CLARIFICATION_NEEDED，会通过条件边路由到 END
+    # 注意：plan_strategy 节点如果返回 USER_CLARIFICATION_NEEDED，会通过条件边路由到 END
     
     # execute_code → fix_code 或 evaluate_completeness（新流程）
     workflow.add_conditional_edges(

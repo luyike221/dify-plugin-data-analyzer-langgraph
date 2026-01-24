@@ -14,11 +14,11 @@ import operator
 class AnalysisPhase(str, Enum):
     """分析阶段枚举"""
     INIT = "init"
-    INTENT_ANALYSIS = "intent_analysis"  # 意图识别和策略制定
+    STRATEGY_PLANNING = "strategy_planning"  # 策略制定
     CODE_GENERATION = "code_generation"
     CODE_EXECUTION = "code_execution"
     ERROR_FIXING = "error_fixing"
-    EVALUATE_COMPLETENESS = "evaluate_completeness"  # 评估分析完整性（新增）
+    EVALUATE_COMPLETENESS = "evaluate_completeness"  # 评估分析完整性
     REPORT_GENERATION = "report_generation"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -92,8 +92,6 @@ class AnalysisState(TypedDict, total=False):
         
         # === 多轮分析相关 ===
         max_analysis_rounds: 最大分析轮数（防止无限循环）
-        completed_directions: 已完成的分析方向列表
-        next_analysis_direction: 下一轮分析方向
         need_more_analysis: 是否需要更多分析
         all_execution_outputs: 所有轮次的执行结果
         
@@ -130,19 +128,16 @@ class AnalysisState(TypedDict, total=False):
     execution_success: bool
     error_message: Optional[str]
     
-    # === 意图分析结果 ===
-    refined_prompt: str  # 重写后的用户输入
-    analysis_type: str  # 分析类型：simple/overview/specific
-    analysis_tasks: List[str]  # 分析任务列表
-    current_task: str  # 当前轮次要完成的任务
-    completed_tasks: Annotated[List[str], operator.add]  # 已完成的任务列表
-    intent_analysis_result: str  # 意图分析结果（JSON格式）
-    needs_clarification: bool  # 是否需要用户澄清
-    clarification_message: Optional[str]  # 澄清消息
-    
-    # 兼容旧字段（保留但不推荐使用）
-    analysis_strategy: str  # 分析策略（旧）
-    research_directions: List[str]  # 研究方向列表（旧）
+    # === 分析策略 ===
+    # 统一的分析策略对象，包含：
+    #   - type: str - 分析类型（simple/overview/specific）
+    #   - refined_query: str - 优化后的用户查询
+    #   - tasks: List[str] - 分析任务列表
+    #   - current_task: str - 当前轮次要完成的任务
+    #   - completed_tasks: List[str] - 已完成的任务列表
+    #   - needs_clarification: bool - 是否需要用户澄清
+    #   - clarification_message: Optional[str] - 澄清消息
+    analysis_strategy: Dict[str, Any]
     
     # === 历史记录 ===
     code_history: Annotated[List[str], operator.add]
@@ -155,8 +150,6 @@ class AnalysisState(TypedDict, total=False):
     
     # === 多轮分析相关 ===
     max_analysis_rounds: int  # 最大分析轮数（防止无限循环），默认3
-    completed_directions: Annotated[List[str], operator.add]  # 已完成的分析方向
-    next_analysis_direction: str  # 下一轮分析方向
     need_more_analysis: bool  # 是否需要更多分析
     all_execution_outputs: Annotated[List[str], operator.add]  # 所有轮次的执行结果
     
@@ -240,19 +233,16 @@ def create_initial_state(
         execution_success=False,
         error_message=None,
         
-        # 意图分析结果（初始为空）
-        refined_prompt="",
-        analysis_type="",  # simple/overview/specific
-        analysis_tasks=[],
-        current_task="",
-        completed_tasks=[],
-        intent_analysis_result="",
-        needs_clarification=False,
-        clarification_message=None,
-        
-        # 兼容旧字段
-        analysis_strategy="",
-        research_directions=[],
+        # 分析策略（初始为空）
+        analysis_strategy={
+            "type": "",  # simple/overview/specific
+            "refined_query": "",
+            "tasks": [],
+            "current_task": "",
+            "completed_tasks": [],
+            "needs_clarification": False,
+            "clarification_message": None,
+        },
         
         # 历史记录
         code_history=[],
@@ -265,8 +255,6 @@ def create_initial_state(
         
         # 多轮分析相关
         max_analysis_rounds=max_analysis_rounds,
-        completed_directions=[],
-        next_analysis_direction="",
         need_more_analysis=False,
         all_execution_outputs=[],
         
