@@ -427,10 +427,26 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
         "clarification_message": None,
     }
     
+    # 根据策略任务数量动态调整最大轮数
+    if analysis_type == "simple":
+        # 简单查询：1轮足够
+        max_rounds = 1
+    elif analysis_type == "overview":
+        # 概述分析：任务数 + 1（允许额外探索），最多5轮
+        max_rounds = min(len(tasks) + 1, 5)
+    elif analysis_type == "specific":
+        # 具体分析：任务数 + 1（允许深入挖掘），最多6轮
+        max_rounds = min(len(tasks) + 1, 6)
+    else:
+        # 默认：任务数，如果没有任务则使用默认值3
+        max_rounds = len(tasks) if tasks else 3
+    
     logger.info(f"✅ [Node] 策略制定完成")
     logger.info(f"   - 分析类型: {analysis_type}")
     logger.info(f"   - 分析任务: {tasks}")
+    logger.info(f"   - 任务数量: {len(tasks)}")
     logger.info(f"   - 首个任务: {first_task}")
+    logger.info(f"   - 动态设置最大轮数: {max_rounds}")
     
     # 输出分析策略
     _push_to_request_queue(request_id, f"**分析类型：** {analysis_type}\n\n")
@@ -443,6 +459,7 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
     return {
         "phase": AnalysisPhase.CODE_GENERATION.value,
         "analysis_strategy": strategy,
+        "max_analysis_rounds": max_rounds,  # 动态调整最大轮数
         "messages": messages + [{"role": "assistant", "content": response}],
         "stream_output": [],
     }

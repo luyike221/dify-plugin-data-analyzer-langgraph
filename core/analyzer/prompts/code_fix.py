@@ -4,7 +4,7 @@
 职责：修复执行失败的代码
 """
 
-from typing import List
+from typing import List, Dict
 
 
 # 代码修复 System Prompt

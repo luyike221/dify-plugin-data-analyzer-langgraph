@@ -4,6 +4,8 @@
 保留，用于特殊场景
 """
 
+from typing import List, Dict
+
 
 # 继续分析 System Prompt
 CONTINUE_ANALYSIS_SYSTEM = """你是数据分析专家。根据之前的结果决定下一步。
