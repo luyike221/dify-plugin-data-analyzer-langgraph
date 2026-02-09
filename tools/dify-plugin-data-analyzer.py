@@ -257,6 +257,18 @@ class DifyPluginDataAnalyzerTool(Tool):
         thread_id = tool_parameters.get("thread_id")  # 从工具参数获取会话ID（由Dify生成并传入）
         sheet_name = tool_parameters.get("sheet_name")  # 从工具参数获取工作表名称
         
+        # 调试日志：打印接收到的所有参数
+        logger.info(f"🔍 接收到的工具参数: {list(tool_parameters.keys())}")
+        logger.info(f"🔍 input_file 参数类型: {type(input_file)}")
+        logger.info(f"🔍 input_file 参数值: {input_file}")
+        if input_file is not None:
+            if isinstance(input_file, (list, tuple)):
+                logger.info(f"🔍 input_file 是列表/元组，长度: {len(input_file)}")
+                for i, item in enumerate(input_file):
+                    logger.info(f"🔍   文件 {i+1} 类型: {type(item)}, 值: {item}")
+            else:
+                logger.info(f"🔍 input_file 是单个对象，类型: {type(input_file)}")
+        
         # 从 provider credentials 获取配置
         llm_api_key = None
         llm_base_url = None
@@ -392,90 +404,15 @@ class DifyPluginDataAnalyzerTool(Tool):
             return
         
         try:
-            # === 流式输出：开始处理 ===
-            yield self.create_stream_variable_message('stream_output', "🚀 **开始处理Excel文件...**\n\n")
-            
-            # 处理文件参数
-            file_content = None
-            filename = None
-            
-            logger.info("🔍 检查输入文件类型...")
-            
-            if self._is_dify_file(input_file):
-                yield self.create_stream_variable_message('stream_output', "📥 正在获取上传的文件...\n")
-                
-                # 获取 Dify API Key
-                dify_api_key = None
-                if hasattr(self, 'runtime'):
-                    if hasattr(self.runtime, 'api_key'):
-                        dify_api_key = self.runtime.api_key
-                    elif hasattr(self.runtime, 'dify_api_key'):
-                        dify_api_key = self.runtime.dify_api_key
-                
-                if not dify_api_key and credentials:
-                    dify_api_key = credentials.get("dify_api_key") or credentials.get("api_key")
-                
-                if not dify_api_key:
-                    dify_api_key = os.environ.get("DIFY_API_KEY")
-                
-                try:
-                    file_content, filename = self._get_file_from_dify_file(input_file, dify_api_key)
-                    if file_content is None:
-                        yield self.create_stream_variable_message('stream_output', "❌ 无法从 Dify File 对象获取文件内容\n")
-                        return
-                    yield self.create_stream_variable_message('stream_output', f"✅ 文件获取成功: {filename} ({len(file_content)/1024:.1f} KB)\n\n")
-                except Exception as e:
-                    yield self.create_stream_variable_message('stream_output', f"❌ 处理文件时出错: {str(e)}\n")
-                    return
-                    
-            elif isinstance(input_file, str):
-                if os.path.exists(input_file):
-                    with open(input_file, "rb") as f:
-                        file_content = f.read()
-                    filename = os.path.basename(input_file)
-                    yield self.create_stream_variable_message('stream_output', f"✅ 读取本地文件: {filename}\n\n")
-                else:
-                    yield self.create_stream_variable_message('stream_output', f"❌ 文件不存在: {input_file}\n")
-                    return
-                    
-            elif hasattr(input_file, "read"):
-                file_content = input_file.read()
-                filename = getattr(input_file, "filename", "uploaded_file.xlsx")
-                if hasattr(input_file, "name"):
-                    filename = os.path.basename(input_file.name)
-                yield self.create_stream_variable_message('stream_output', f"✅ 读取文件对象: {filename}\n\n")
-                
-            elif isinstance(input_file, dict):
-                if "path" in input_file:
-                    file_path = input_file["path"]
-                    if os.path.exists(file_path):
-                        with open(file_path, "rb") as f:
-                            file_content = f.read()
-                        filename = os.path.basename(file_path)
-                        yield self.create_stream_variable_message('stream_output', f"✅ 读取文件: {filename}\n\n")
-                    else:
-                        yield self.create_stream_variable_message('stream_output', f"❌ 文件不存在: {file_path}\n")
-                        return
-                elif "content" in input_file:
-                    file_content = input_file["content"]
-                    if isinstance(file_content, str):
-                        file_content = file_content.encode("utf-8")
-                    filename = input_file.get("filename", "uploaded_file.xlsx")
-                else:
-                    yield self.create_stream_variable_message('stream_output', "❌ 无法从文件参数中提取内容\n")
-                    return
+            # === 支持多文件上传：将单个文件转换为列表 ===
+            # 为了兼容性，如果传入的是单个文件，转换为列表
+            if not isinstance(input_file, (list, tuple)):
+                input_files = [input_file]
             else:
-                yield self.create_stream_variable_message('stream_output', f"❌ 不支持的文件类型: {type(input_file)}\n")
-                return
+                input_files = list(input_file)
             
-            if not file_content:
-                yield self.create_stream_variable_message('stream_output', "❌ 无法读取文件内容\n")
-                return
-            
-            if not filename:
-                filename = "uploaded_file.xlsx"
-            
-            analysis_prompt = query if query else DEFAULT_EXCEL_ANALYSIS_PROMPT
+            total_files = len(input_files)
+            yield self.create_stream_variable_message('stream_output', f"🚀 **开始处理 {total_files} 个Excel文件...**\n\n")
             
             # 处理会话ID：从工具参数获取（由Dify生成并传入）
             # 如果提供了thread_id，使用它；否则创建新会话（静默处理，不输出）
@@ -491,43 +428,143 @@ class DifyPluginDataAnalyzerTool(Tool):
             import re
             thread_id_pattern = re.compile(r'(?:会话ID|Session ID)[:：]\s*(thread-[a-f0-9]{24})', re.IGNORECASE)
             
-            # === 核心：使用流式分析函数 ===
-            # 直接使用同步 Generator 并逐块输出
-            # analyzer_type 决定使用 LangGraph 还是 Legacy 分析器
-            for chunk in analyze_excel_stream(
-                file_content=file_content,
-                filename=filename,
-                analysis_api_url=analysis_api_url,
-                analysis_model=analysis_model,
-                thread_id=thread_id,  # 传递会话ID（来自Dify的conversation_id或插件内部创建）
-                use_llm_validate=use_llm_validate,
-                sheet_name=sheet_name,  # 传递工作表名称，如果为None则处理第一个工作表
-                auto_analysis=True,
-                analysis_prompt=analysis_prompt,
-                temperature=0.4,
-                llm_api_key=llm_api_key,
-                llm_base_url=llm_base_url,
-                llm_model=llm_model,
-                analysis_api_key=analysis_api_key,
-                analyzer_type=analyzer_type,  # 分析器类型：langgraph 或 legacy
-                preprocessing_timeout=preprocessing_timeout,  # 预处理超时时间
-                analysis_timeout=analysis_timeout,  # 分析超时时间
-                debug_print_execution_output=debug_print_execution_output,  # 调试：是否打印代码执行结果
-                debug_print_header_analysis=debug_print_header_analysis,  # 调试：是否打印表头分析LLM响应
-                max_file_size_mb=max_file_size_mb,  # 最大文件大小（MB）
-                excel_processing_timeout=excel_processing_timeout,  # Excel处理超时时间（秒）
-                max_rows=max_rows,  # 最大行数
-            ):
-                # 流式输出每个块
-                yield self.create_stream_variable_message('stream_output', chunk)
+            analysis_prompt = query if query else DEFAULT_EXCEL_ANALYSIS_PROMPT
+            
+            # === 多文件处理：先预处理所有文件，再统一分析 ===
+            # 收集所有文件的内容
+            files_data = []
+            
+            for file_index, input_file in enumerate(input_files, 1):
+                yield self.create_stream_variable_message('stream_output', f"📥 **获取文件 {file_index}/{total_files}**\n")
                 
-                # 如果Dify未提供会话ID，尝试从输出中提取插件内部创建的会话ID
-                if not final_thread_id and not thread_id:
-                    match = thread_id_pattern.search(chunk)
-                    if match:
-                        final_thread_id = match.group(1)
-                        # 立即输出会话ID变量，方便后续引用
-                        yield self.create_variable_message('thread_id', final_thread_id)
+                # 处理文件参数
+                file_content = None
+                filename = None
+                
+                logger.info(f"🔍 检查输入文件类型 (文件 {file_index}/{total_files})...")
+                
+                if self._is_dify_file(input_file):
+                    # 获取 Dify API Key
+                    dify_api_key = None
+                    if hasattr(self, 'runtime'):
+                        if hasattr(self.runtime, 'api_key'):
+                            dify_api_key = self.runtime.api_key
+                        elif hasattr(self.runtime, 'dify_api_key'):
+                            dify_api_key = self.runtime.dify_api_key
+                    
+                    if not dify_api_key and credentials:
+                        dify_api_key = credentials.get("dify_api_key") or credentials.get("api_key")
+                    
+                    if not dify_api_key:
+                        dify_api_key = os.environ.get("DIFY_API_KEY")
+                    
+                    try:
+                        file_content, filename = self._get_file_from_dify_file(input_file, dify_api_key)
+                        if file_content is None:
+                            yield self.create_stream_variable_message('stream_output', f"❌ 无法从 Dify File 对象获取文件内容，跳过此文件\n")
+                            continue
+                        yield self.create_stream_variable_message('stream_output', f"✅ 文件获取成功: {filename} ({len(file_content)/1024:.1f} KB)\n")
+                    except Exception as e:
+                        yield self.create_stream_variable_message('stream_output', f"❌ 处理文件时出错: {str(e)}，跳过此文件\n")
+                        continue
+                        
+                elif isinstance(input_file, str):
+                    if os.path.exists(input_file):
+                        with open(input_file, "rb") as f:
+                            file_content = f.read()
+                        filename = os.path.basename(input_file)
+                        yield self.create_stream_variable_message('stream_output', f"✅ 读取本地文件: {filename}\n")
+                    else:
+                        yield self.create_stream_variable_message('stream_output', f"❌ 文件不存在: {input_file}，跳过此文件\n")
+                        continue
+                        
+                elif hasattr(input_file, "read"):
+                    file_content = input_file.read()
+                    filename = getattr(input_file, "filename", "uploaded_file.xlsx")
+                    if hasattr(input_file, "name"):
+                        filename = os.path.basename(input_file.name)
+                    yield self.create_stream_variable_message('stream_output', f"✅ 读取文件对象: {filename}\n")
+                    
+                elif isinstance(input_file, dict):
+                    if "path" in input_file:
+                        file_path = input_file["path"]
+                        if os.path.exists(file_path):
+                            with open(file_path, "rb") as f:
+                                file_content = f.read()
+                            filename = os.path.basename(file_path)
+                            yield self.create_stream_variable_message('stream_output', f"✅ 读取文件: {filename}\n")
+                        else:
+                            yield self.create_stream_variable_message('stream_output', f"❌ 文件不存在: {file_path}，跳过此文件\n")
+                            continue
+                    elif "content" in input_file:
+                        file_content = input_file["content"]
+                        if isinstance(file_content, str):
+                            file_content = file_content.encode("utf-8")
+                        filename = input_file.get("filename", "uploaded_file.xlsx")
+                    else:
+                        yield self.create_stream_variable_message('stream_output', "❌ 无法从文件参数中提取内容，跳过此文件\n")
+                        continue
+                else:
+                    yield self.create_stream_variable_message('stream_output', f"❌ 不支持的文件类型: {type(input_file)}，跳过此文件\n")
+                    continue
+                
+                if not file_content:
+                    yield self.create_stream_variable_message('stream_output', f"❌ 无法读取文件 {file_index} 的内容，跳过此文件\n")
+                    continue
+                
+                if not filename:
+                    filename = f"uploaded_file_{file_index}.xlsx"
+                
+                files_data.append({
+                    "file_content": file_content,
+                    "filename": filename,
+                })
+            
+            if not files_data:
+                yield self.create_stream_variable_message('stream_output', "❌ 没有有效的文件可以处理\n")
+                return
+            
+            yield self.create_stream_variable_message('stream_output', f"\n✅ **已收集 {len(files_data)} 个文件**\n\n")
+            
+            # === 统一使用多文件分析函数（不再区分单文件和多文件） ===
+            from core.analyzer.api import analyze_excel_files_with_langgraph
+            
+            try:
+                for chunk in analyze_excel_files_with_langgraph(
+                    files_data=files_data,
+                    analysis_api_url=analysis_api_url,
+                    analysis_model=analysis_model,
+                    thread_id=thread_id,
+                    use_llm_validate=use_llm_validate,
+                    sheet_name=sheet_name,
+                    analysis_prompt=analysis_prompt,
+                    temperature=0.4,
+                    llm_api_key=llm_api_key,
+                    llm_base_url=llm_base_url,
+                    llm_model=llm_model,
+                    analysis_api_key=analysis_api_key,
+                    preprocessing_timeout=preprocessing_timeout,
+                    analysis_timeout=analysis_timeout,
+                    debug_print_execution_output=debug_print_execution_output,
+                    debug_print_header_analysis=debug_print_header_analysis,
+                    max_analysis_rounds=3,
+                    max_file_size_mb=max_file_size_mb,
+                    excel_processing_timeout=excel_processing_timeout,
+                ):
+                    yield self.create_stream_variable_message('stream_output', chunk)
+                    
+                    # 如果Dify未提供会话ID，尝试从输出中提取插件内部创建的会话ID
+                    if not final_thread_id and not thread_id:
+                        match = thread_id_pattern.search(chunk)
+                        if match:
+                            final_thread_id = match.group(1)
+                            thread_id = final_thread_id
+                            yield self.create_variable_message('thread_id', final_thread_id)
+            except Exception as e:
+                import traceback
+                error_msg = f"❌ **处理文件时出错**\n\n```\n{str(e)}\n```\n\n"
+                yield self.create_stream_variable_message('stream_output', error_msg)
+                logger.error(f"处理文件时出错: {traceback.format_exc()}")
             
             # 输出会话ID变量
             if final_thread_id:
@@ -541,3 +578,7 @@ class DifyPluginDataAnalyzerTool(Tool):
             import traceback
             error_msg = f"❌ **处理过程出错**\n\n```\n{str(e)}\n{traceback.format_exc()}\n```\n"
             yield self.create_stream_variable_message('stream_output', error_msg)
+
+
+# 导出工具类，确保插件框架能够正确识别
+__all__ = ['DifyPluginDataAnalyzerTool']

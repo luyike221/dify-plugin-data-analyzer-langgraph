@@ -107,12 +107,13 @@ class AnalysisState(TypedDict, total=False):
     # === 输入数据 ===
     workspace_dir: str
     thread_id: str
-    csv_path: str
-    column_names: List[str]
-    column_metadata: Dict[str, Any]
-    row_count: int
-    data_preview: str
+    csv_path: str  # 当前使用的CSV文件路径（单文件场景）或主文件路径（多文件场景）
+    column_names: List[str]  # 当前使用的文件的列名
+    column_metadata: Dict[str, Any]  # 当前使用的文件的列元数据
+    row_count: int  # 当前使用的文件的行数
+    data_preview: str  # 当前使用的文件的数据预览
     user_prompt: str
+    available_files: Optional[List[Dict[str, Any]]]  # 多文件场景：所有可用文件的信息列表
     
     # === LLM 配置 ===
     api_url: str
@@ -137,6 +138,7 @@ class AnalysisState(TypedDict, total=False):
     #   - completed_tasks: List[str] - 已完成的任务列表
     #   - needs_clarification: bool - 是否需要用户澄清
     #   - clarification_message: Optional[str] - 澄清消息
+    #   - selected_files: Optional[List[str]] - 多文件场景：策略选择的文件路径列表
     analysis_strategy: Dict[str, Any]
     
     # === 历史记录 ===
@@ -175,6 +177,7 @@ def create_initial_state(
     request_id: Optional[str] = None,  # 新增：请求唯一标识
     debug_print_execution_output: bool = False,  # 是否在流式输出中打印代码执行结果
     max_analysis_rounds: int = 3,  # 最大分析轮数，防止无限循环
+    available_files: Optional[List[Dict[str, Any]]] = None,  # 多文件场景：所有可用文件的信息
 ) -> AnalysisState:
     """
     创建初始分析状态
@@ -218,6 +221,7 @@ def create_initial_state(
         row_count=row_count,
         data_preview=data_preview,
         user_prompt=user_prompt,
+        available_files=available_files,  # 多文件信息
         
         # LLM 配置
         api_url=api_url,

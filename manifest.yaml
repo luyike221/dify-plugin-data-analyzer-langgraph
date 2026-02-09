@@ -24,7 +24,7 @@ meta:
   version: 0.0.1
   arch:
     - amd64
-    - arm64
+    - arm64w
   runner:
     language: python
     version: "3.12"

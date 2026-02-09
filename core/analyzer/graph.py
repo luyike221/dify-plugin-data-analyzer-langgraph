@@ -338,19 +338,31 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
     策略制定节点
     
     职责：制定数据分析策略，包括分析方法选择、任务分解、优先级排序
+    支持多文件场景：如果有多个文件，让LLM选择要使用的文件
     """
     logger.info("🎯 [Node] 策略制定节点开始执行")
     
     request_id = state.get("request_id", "")
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
-    # 构建策略制定 prompt
-    messages = PromptTemplates.format_strategy_planning_prompt(
-        csv_path=state["csv_path"],
-        row_count=state["row_count"],
-        column_names=state["column_names"],
-        column_metadata=state["column_metadata"],
-        data_preview=state["data_preview"],
+    # 统一使用多文件格式的 prompt（单文件时也是列表，只有一个元素）
+    available_files = state.get("available_files")
+    if not available_files:
+        # 如果没有 available_files，构建单文件信息（兼容旧数据）
+        available_files = [{
+            "filename": os.path.basename(state["csv_path"]),
+            "csv_path": state["csv_path"],
+            "row_count": state["row_count"],
+            "column_names": state["column_names"],
+            "column_metadata": state["column_metadata"],
+            "data_preview": state["data_preview"],
+        }]
+    
+    logger.info(f"📁 [Node] 处理 {len(available_files)} 个文件")
+    
+    # 统一使用多文件版本的 prompt
+    messages = PromptTemplates.format_strategy_planning_prompt_multi_file(
+        files_info=available_files,
         user_prompt=state["user_prompt"],
     )
     
@@ -416,6 +428,7 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
     refined_query = strategy_result.get("refined_query", state["user_prompt"])
     tasks = strategy_result.get("tasks", [refined_query])
     first_task = strategy_result.get("first_task", tasks[0] if tasks else refined_query)
+    selected_files = strategy_result.get("selected_files", [])  # 多文件场景：LLM选择的文件
     
     strategy = {
         "type": analysis_type,
@@ -425,7 +438,42 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
         "completed_tasks": [],
         "needs_clarification": False,
         "clarification_message": None,
+        "selected_files": selected_files,  # 多文件场景：选择的文件路径列表
     }
+    
+    # 根据选择的文件更新状态中的当前文件信息
+    if selected_files:
+        # 找到第一个选择的文件（或使用第一个文件作为默认）
+        selected_file_info = None
+        for file_info in available_files:
+            if file_info.get("csv_path") in selected_files:
+                selected_file_info = file_info
+                break
+        
+        # 如果没找到，使用第一个文件
+        if not selected_file_info:
+            selected_file_info = available_files[0]
+            logger.warning(f"⚠️ [Node] 未找到选择的文件，使用第一个文件: {selected_file_info.get('filename')}")
+        
+        # 更新状态中的当前文件信息
+        state["csv_path"] = selected_file_info.get("csv_path", state["csv_path"])
+        state["column_names"] = selected_file_info.get("column_names", state["column_names"])
+        state["column_metadata"] = selected_file_info.get("column_metadata", state["column_metadata"])
+        state["row_count"] = selected_file_info.get("row_count", state["row_count"])
+        state["data_preview"] = selected_file_info.get("data_preview", state["data_preview"])
+        
+        logger.info(f"📁 [Node] 策略选择了文件: {selected_file_info.get('filename')}")
+        if len(selected_files) > 1:
+            logger.info(f"📁 [Node] 将使用多个文件进行分析: {[f.get('filename', '') for f in available_files if f.get('csv_path') in selected_files]}")
+    else:
+        # 如果没有选择文件，使用第一个文件（单文件场景）
+        if available_files:
+            first_file = available_files[0]
+            state["csv_path"] = first_file.get("csv_path", state["csv_path"])
+            state["column_names"] = first_file.get("column_names", state["column_names"])
+            state["column_metadata"] = first_file.get("column_metadata", state["column_metadata"])
+            state["row_count"] = first_file.get("row_count", state["row_count"])
+            state["data_preview"] = first_file.get("data_preview", state["data_preview"])
     
     # 根据策略任务数量动态调整最大轮数
     if analysis_type == "simple":
@@ -498,17 +546,94 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     logger.info(f"   - 首轮: {is_first_round}")
     logger.info(f"   - 当前任务: {current_task[:100]}...")
     
-    # 构建 prompt（区分首轮和后续轮）
-    messages = PromptTemplates.format_code_generation_prompt(
-        csv_path=state["csv_path"],
-        row_count=state["row_count"],
-        column_names=state["column_names"],
-        column_metadata=state["column_metadata"],
-        data_preview=state["data_preview"],
-        user_prompt=current_task,
-        previous_results=previous_results,
-        is_first_round=is_first_round,
-    )
+    # 检查是否选择了多个文件进行分析
+    strategy = state.get("analysis_strategy", {})
+    selected_files = strategy.get("selected_files", [])
+    available_files = state.get("available_files")
+    
+    # 如果没有 available_files，构建单文件信息（兼容旧数据）
+    if not available_files:
+        available_files = [{
+            "filename": os.path.basename(state["csv_path"]),
+            "csv_path": state["csv_path"],
+            "row_count": state["row_count"],
+            "column_names": state["column_names"],
+            "column_metadata": state["column_metadata"],
+            "data_preview": state["data_preview"],
+        }]
+    
+    # 判断是否选择了多个文件
+    is_multi_file_analysis = selected_files and len(selected_files) > 1
+    
+    # 构建 prompt（区分首轮和后续轮，以及单文件和多文件）
+    if is_multi_file_analysis:
+        # 多文件场景：需要合并或对比分析
+        # 收集所有选择的文件信息
+        selected_files_info = []
+        for file_info in available_files:
+            if file_info.get("csv_path") in selected_files:
+                selected_files_info.append(file_info)
+        
+        # 构建多文件数据信息
+        from .prompts.data_info import format_multi_file_data_info
+        multi_file_data_info = format_multi_file_data_info(selected_files_info)
+        
+        # 修改 System Prompt 以支持多文件分析
+        multi_file_system_prompt = PromptTemplates.CODE_GENERATION_SYSTEM + """
+
+## 多文件分析规则
+
+1. **文件读取**：使用 pandas 读取多个 CSV 文件
+2. **文件合并**：如果需要进行合并分析，使用 `pd.merge()` 或 `pd.concat()`
+3. **文件对比**：如果需要进行对比分析，分别读取文件后进行比较
+4. **文件路径**：使用上述提供的文件路径
+"""
+        
+        if is_first_round or not previous_results:
+            user_content = f"""{multi_file_data_info}
+
+## 分析任务
+
+{current_task}
+
+请编写 Python 代码完成此任务。注意：
+- 需要分析多个文件，请根据任务需求选择合适的文件
+- 可以进行文件合并、对比或分别分析
+- 所有结果必须通过 print() 输出，禁止硬编码结论
+"""
+        else:
+            user_content = f"""{multi_file_data_info}
+
+## 之前的分析结果
+
+{previous_results}
+
+## 当前分析任务
+
+{current_task}
+
+请基于之前的分析结果，编写代码完成当前任务。
+- 不要重复之前已分析的内容
+- 可以引用之前的发现进行深入分析
+- 所有结果通过 print() 输出
+"""
+        
+        messages = [
+            {"role": "system", "content": multi_file_system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+    else:
+        # 单文件场景：使用原有逻辑
+        messages = PromptTemplates.format_code_generation_prompt(
+            csv_path=state["csv_path"],
+            row_count=state["row_count"],
+            column_names=state["column_names"],
+            column_metadata=state["column_metadata"],
+            data_preview=state["data_preview"],
+            user_prompt=current_task,
+            previous_results=previous_results,
+            is_first_round=is_first_round,
+        )
     
     # 输出标题
     if is_first_round:
@@ -1263,7 +1388,8 @@ class DataAnalysisGraph:
         temperature: float = 0.4,
         analysis_timeout: Optional[int] = None,
         debug_print_execution_output: bool = False,
-        max_analysis_rounds: int = 3,  # 新增：最大分析轮数
+        max_analysis_rounds: int = 3,
+        available_files: Optional[List[Dict[str, Any]]] = None,  # 所有可用文件信息（单文件时也是列表）
     ) -> Generator[str, None, AnalysisResult]:
         """
         执行数据分析（流式输出）
@@ -1295,7 +1421,7 @@ class DataAnalysisGraph:
         request_queue = _create_request_queue(request_id)
         
         try:
-            # 创建初始状态（包含 request_id）
+            # 创建初始状态（包含 request_id 和多文件信息）
             initial_state = create_initial_state(
                 workspace_dir=workspace_dir,
                 thread_id=thread_id,
@@ -1312,6 +1438,7 @@ class DataAnalysisGraph:
                 request_id=request_id,  # 传递请求ID
                 debug_print_execution_output=debug_print_execution_output,  # 传递调试配置
                 max_analysis_rounds=max_analysis_rounds,  # 传递最大分析轮数
+                available_files=available_files,  # 传递多文件信息
             )
             
             # 在后台线程中执行工作流

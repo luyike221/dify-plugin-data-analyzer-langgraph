@@ -4,8 +4,8 @@
 职责：制定数据分析策略，包括分析方法选择、任务分解、优先级排序
 """
 
-from typing import Dict, Any, List
-from .data_info import format_data_info
+from typing import Dict, Any, List, Optional
+from .data_info import format_data_info, format_multi_file_data_info
 
 
 # 策略制定 System Prompt
@@ -43,6 +43,7 @@ STRATEGY_PLANNING_SYSTEM = """你是数据分析策略专家。你的任务是�
 2. **优先级排序**：按重要性和依赖关系排序任务
 3. **可执行性**：每个任务必须明确、可执行、可验证
 4. **渐进式**：从基础分析到深入分析，逐步推进
+5. **文件选择**：如果有多个文件，根据分析需求选择合适的文件（可以是一个或多个）
 
 ## 输出格式（JSON）
 
@@ -53,10 +54,15 @@ STRATEGY_PLANNING_SYSTEM = """你是数据分析策略专家。你的任务是�
     "clarification_message": "如需澄清的消息",
     "type": "simple/overview/specific",
     "refined_query": "优化后的用户查询",
+    "selected_files": ["文件1路径", "文件2路径", ...],
     "tasks": ["任务1", "任务2", ...],
     "first_task": "第一轮要完成的具体任务"
 }
 ```
+
+**注意**：
+- 如果有多个文件，`selected_files` 指定要使用的文件路径（可以是空数组，表示使用所有文件）
+- 如果只有一个文件，`selected_files` 可以省略或包含该文件路径
 
 ## 关键规则
 
@@ -84,10 +90,40 @@ def format_strategy_planning_prompt(
     data_preview: str,
     user_prompt: str,
 ) -> List[Dict[str, str]]:
-    """格式化策略制定 Prompt"""
+    """格式化策略制定 Prompt（单文件版本）"""
     data_info = format_data_info(
         csv_path, row_count, column_names, column_metadata, data_preview
     )
+    
+    user_content = STRATEGY_PLANNING_USER.format(
+        data_info=data_info,
+        user_prompt=user_prompt,
+    )
+    
+    return [
+        {"role": "system", "content": STRATEGY_PLANNING_SYSTEM},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def format_strategy_planning_prompt_multi_file(
+    files_info: List[Dict[str, Any]],
+    user_prompt: str,
+) -> List[Dict[str, str]]:
+    """
+    格式化策略制定 Prompt（多文件版本）
+    
+    Args:
+        files_info: 文件信息列表，每个元素包含：
+            - filename: 文件名
+            - csv_path: CSV文件路径
+            - row_count: 数据行数
+            - column_names: 列名列表
+            - column_metadata: 列元数据
+            - data_preview: 数据预览（可选）
+        user_prompt: 用户分析需求
+    """
+    data_info = format_multi_file_data_info(files_info)
     
     user_content = STRATEGY_PLANNING_USER.format(
         data_info=data_info,

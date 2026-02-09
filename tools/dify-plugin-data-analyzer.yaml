@@ -15,7 +15,7 @@ description:
   llm: "Intelligent Excel Analysis API - Automated multi-level header processing and AI-powered data analysis with code generation and execution"
 parameters:
   - name: input_file
-    type: file
+    type: files
     required: true
     label:
       en_US: Upload File
@@ -28,7 +28,7 @@ parameters:
       pt_BR: "Envie um arquivo Excel para processar e analisar"
       ja_JP: "処理および分析するExcelファイルをアップロード"
     llm_description: "Excel file to be analyzed. Supports .xlsx, .xls, .xlsm, .xlsb formats."
-    form: form
+    form: llm
   - name: query
     type: string
     required: false

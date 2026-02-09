@@ -21,6 +21,7 @@ from .strategy_planning import (
     STRATEGY_PLANNING_SYSTEM,
     STRATEGY_PLANNING_USER,
     format_strategy_planning_prompt,
+    format_strategy_planning_prompt_multi_file,
 )
 from .code_generation import (
     CODE_GENERATION_SYSTEM,
@@ -124,9 +125,20 @@ class PromptTemplates:
         data_preview: str,
         user_prompt: str,
     ) -> List[Dict[str, str]]:
-        """格式化策略制定 Prompt"""
+        """格式化策略制定 Prompt（单文件版本）"""
         return format_strategy_planning_prompt(
             csv_path, row_count, column_names, column_metadata, data_preview, user_prompt
+        )
+    
+    @classmethod
+    def format_strategy_planning_prompt_multi_file(
+        cls,
+        files_info: List[Dict[str, Any]],
+        user_prompt: str,
+    ) -> List[Dict[str, str]]:
+        """格式化策略制定 Prompt（多文件版本）"""
+        return format_strategy_planning_prompt_multi_file(
+            files_info, user_prompt
         )
     
     @classmethod
@@ -215,6 +227,7 @@ __all__ = [
     "STRATEGY_PLANNING_SYSTEM",
     "STRATEGY_PLANNING_USER",
     "format_strategy_planning_prompt",
+    "format_strategy_planning_prompt_multi_file",
     # 代码生成
     "CODE_GENERATION_SYSTEM",
     "CODE_GENERATION_USER_FIRST",
