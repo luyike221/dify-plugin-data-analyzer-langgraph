@@ -399,29 +399,11 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
             "first_task": state["user_prompt"],
         }
     
-    # 判断是否需要澄清
+    # 过去这里会根据 is_relevant / needs_clarification 进行「需要澄清」分支。
+    # 现在改为无论用户输入如何，都直接进入分析流程，不再中断让用户补充问题。
+    # 为兼容后续逻辑，这里仍从结果中取值，但不触发提前返回。
     is_relevant = strategy_result.get("is_relevant", True)
     needs_clarification = strategy_result.get("needs_clarification", False)
-    
-    if not is_relevant or needs_clarification:
-        clarification_msg = strategy_result.get(
-            "clarification_message",
-            "您的分析需求不够明确，请提供更具体的要求。"
-        )
-        _push_to_request_queue(request_id, f"\n\n❓ **需要澄清**\n\n{clarification_msg}\n\n")
-        return {
-            "phase": AnalysisPhase.USER_CLARIFICATION_NEEDED.value,
-            "analysis_strategy": {
-                "type": "",
-                "refined_query": state["user_prompt"],
-                "tasks": [],
-                "current_task": "",
-                "completed_tasks": [],
-                "needs_clarification": True,
-                "clarification_message": clarification_msg,
-            },
-            "stream_output": [],
-        }
     
     # 构建统一策略对象
     analysis_type = strategy_result.get("type", "overview")
@@ -652,17 +634,18 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     
     # 输出标题
     if is_first_round:
-        _push_to_request_queue(request_id, "\n📝 **正在生成分析代码...**\n\n")
+        _push_to_request_queue(request_id, "\n📝 **正在准备分析...**\n\n")
     else:
-        _push_to_request_queue(request_id, f"\n📝 **正在生成第 {round_count + 1} 轮分析代码...**\n\n")
+        _push_to_request_queue(request_id, f"\n📝 **正在准备第 {round_count + 1} 轮分析...**\n\n")
     
-    # 流式调用 LLM
+    # 调用 LLM 生成代码（仅内部使用，不将 token 流式推送给前端）
     response = call_llm(
         client=client,
         messages=messages,
         model=state["model"],
         temperature=state["temperature"],
         stream=True,
+        push_to_queue=False,
         request_id=request_id,
     )
     
@@ -685,7 +668,7 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
         }
     else:
         logger.warning("⚠️ [Node] 未能从 LLM 响应中提取代码")
-        _push_to_request_queue(request_id, f"\n\n⚠️ 未生成代码，直接返回分析结果\n\n")
+        _push_to_request_queue(request_id, "\n\n⚠️ 本轮未产出分析内容，将直接生成报告。\n\n")
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "current_output": response,
@@ -795,18 +778,11 @@ plt.rcParams['axes.unicode_minus'] = False
             except Exception as e:
                 logger.warning(f"⚠️ 检查并复制CSV文件时出错: {e}")
         
-        # 根据配置决定是否输出执行结果
-        debug_print = state.get("debug_print_execution_output", False)
-        if debug_print:
-            _push_to_request_queue(request_id, "\n✅ **代码执行完毕**\n\n")
-            _push_to_request_queue(request_id, "📊 **执行结果：**\n\n")
-            _push_to_request_queue(request_id, f"```\n{output}\n```\n\n")
-            _push_to_request_queue(request_id, "正在评估分析完整性...\n\n")
-        else:
-            # 默认不显示具体执行结果
-            _push_to_request_queue(request_id, "\n✅ **代码执行完毕，正在评估分析完整性...**\n\n")
+        # 不再向前端展示具体执行结果，只给出进度提示
+        # （debug_print_execution_output 仅用于日志，不影响前端输出）
+        _push_to_request_queue(request_id, "\n✅ **本步分析完成，正在继续深度分析...**\n\n")
         
-        # 成功后进入分析完整性评估节点（新流程）
+        # 成功后进入深度分析节点
         return {
             "phase": AnalysisPhase.EVALUATE_COMPLETENESS.value,
             "current_output": output,
@@ -817,13 +793,14 @@ plt.rcParams['axes.unicode_minus'] = False
         }
     else:
         logger.warning(f"❌ [Node] 代码执行失败: {output[:200]}...")
+        # 不将具体错误内容 yield 给用户，仅记录在 state 供修复节点使用
         return {
             "phase": AnalysisPhase.ERROR_FIXING.value,
             "current_output": output,
             "execution_success": False,
             "error_message": output,
             "execution_history": [execution],
-            "stream_output": [f"\n❌ **执行出错：**\n\n```\n{output}\n```\n\n"],
+            "stream_output": [],
         }
 
 
@@ -846,7 +823,7 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "retry_count": retry_count,
-            "stream_output": [f"\n⚠️ 已达到最大重试次数 ({max_retries})，跳过代码执行，直接生成报告\n\n"],
+            "stream_output": ["\n⚠️ 已多次尝试仍未通过该步，将基于当前结果生成报告。\n\n"],
         }
     
     # 创建 LLM 客户端
@@ -869,9 +846,9 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         stream_chunks.append(chunk)
     
     # 先输出标题（实时传递）
-    _push_to_request_queue(request_id, f"\n🔧 **正在修复代码（尝试 {retry_count}/{max_retries}）...**\n\n")
+    _push_to_request_queue(request_id, f"\n🔄 **分析遇到问题，正在自动重试（{retry_count}/{max_retries}）...**\n\n")
     
-    # 流式调用 LLM 修复（每个 token 会通过队列实时传递）
+    # 流式调用 LLM 修复（仅内部使用，不将修复代码内容推送给前端，与代码生成行为一致）
     response = call_llm(
         client=client,
         messages=messages,
@@ -879,6 +856,7 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         temperature=state["temperature"],
         stream=True,
         stream_callback=stream_callback,
+        push_to_queue=False,
         request_id=request_id,
     )
     
@@ -909,7 +887,7 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
         }
     else:
         logger.warning("⚠️ [Node] 未能从修复响应中提取代码")
-        _push_to_request_queue(request_id, f"\n\n⚠️ 无法修复代码，跳过执行，直接生成报告\n\n")
+        _push_to_request_queue(request_id, "\n\n⚠️ 自动重试后仍无法完成该步，将基于已有结果生成报告。\n\n")
         
         # 注意：所有内容都已经在节点执行时实时推送过了
         # stream_output 保留为空，避免重复推送
@@ -924,16 +902,16 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
 
 def evaluate_completeness_node(state: AnalysisState) -> Dict[str, Any]:
     """
-    分析完整性评估节点（新增）
+    深度分析节点
     
-    判断当前分析是否已经充分回答了用户的问题，是否需要进行更多的深入分析。
+    判断当前分析是否已经充分回答用户问题，是否需要进行更多轮深入分析。
     
     功能：
     1. 评估当前分析结果的覆盖度和深度
     2. 判断是否需要进行更多分析
     3. 如果需要，生成下一轮分析的具体方向
     """
-    logger.info("🔍 [Node] 分析完整性评估节点开始执行")
+    logger.info("🔍 [Node] 深度分析节点开始执行")
     
     # 获取请求ID（用于多线程隔离）
     request_id = state.get("request_id", "")
@@ -947,7 +925,7 @@ def evaluate_completeness_node(state: AnalysisState) -> Dict[str, Any]:
     # 如果已达到最大轮数，直接去报告生成
     if current_round >= max_rounds:
         logger.info(f"📊 已达到最大分析轮数 ({max_rounds})，进入报告生成")
-        _push_to_request_queue(request_id, f"\n📊 已完成 {current_round} 轮分析（达到最大轮数），正在生成最终报告...\n\n")
+        _push_to_request_queue(request_id, "\n📊 已完成多轮分析，正在生成最终报告...\n\n")
         return {
             "phase": AnalysisPhase.REPORT_GENERATION.value,
             "need_more_analysis": False,
@@ -990,7 +968,7 @@ def evaluate_completeness_node(state: AnalysisState) -> Dict[str, Any]:
     
     # 在控制台打印LLM的完整响应
     logger.info("=" * 80)
-    logger.info(f"🔍 [分析完整性评估] LLM 完整响应 (轮次 {current_round}/{max_rounds}):")
+    logger.info(f"🔍 [深度分析] LLM 完整响应 (轮次 {current_round}/{max_rounds}):")
     logger.info("=" * 80)
     logger.info(response)
     logger.info("=" * 80)
@@ -1158,18 +1136,19 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
 # 条件路由函数
 # ============================================================================
 
-def route_after_execution(state: AnalysisState) -> Literal["fix_code", "evaluate_completeness"]:
+def route_after_execution(state: AnalysisState) -> Literal["fix_code", "evaluate_completeness", "generate_report"]:
     """
     执行后路由决策
     
-    根据执行结果决定下一步：
-    - 执行成功 → 评估分析完整性（新流程）
     - 执行失败 → 修复代码
+    - 执行成功且启用深度分析 → 深度分析节点
+    - 执行成功且未启用深度分析 → 直接生成报告
     """
-    if state.get("execution_success", False):
-        return "evaluate_completeness"
-    else:
+    if not state.get("execution_success", False):
         return "fix_code"
+    if state.get("enable_deep_analysis", True):
+        return "evaluate_completeness"
+    return "generate_report"
 
 
 def route_after_fix(state: AnalysisState) -> Literal["execute_code", "generate_report"]:
@@ -1231,7 +1210,7 @@ def create_analysis_graph() -> StateGraph:
     workflow.add_node("generate_code", generate_code_node)
     workflow.add_node("execute_code", execute_code_node)
     workflow.add_node("fix_code", fix_code_node)
-    workflow.add_node("evaluate_completeness", evaluate_completeness_node)  # 分析完整性评估节点
+    workflow.add_node("evaluate_completeness", evaluate_completeness_node)  # 深度分析节点
     workflow.add_node("generate_report", generate_report_node)
     
     # 添加边
@@ -1270,13 +1249,14 @@ def create_analysis_graph() -> StateGraph:
     # 处理需要澄清的情况（直接结束）
     # 注意：plan_strategy 节点如果返回 USER_CLARIFICATION_NEEDED，会通过条件边路由到 END
     
-    # execute_code → fix_code 或 evaluate_completeness（新流程）
+    # execute_code → fix_code / evaluate_completeness / generate_report（由 enable_deep_analysis 控制）
     workflow.add_conditional_edges(
         "execute_code",
         route_after_execution,
         {
             "fix_code": "fix_code",
-            "evaluate_completeness": "evaluate_completeness",  # 成功后去评估节点
+            "evaluate_completeness": "evaluate_completeness",
+            "generate_report": "generate_report",  # 不评估时直接生成报告
         }
     )
     
@@ -1407,6 +1387,7 @@ class DataAnalysisGraph:
         debug_print_execution_output: bool = False,
         max_analysis_rounds: int = 3,
         available_files: Optional[List[Dict[str, Any]]] = None,  # 所有可用文件信息（单文件时也是列表）
+        enable_deep_analysis: bool = True,  # 是否启用深度分析（False 时执行成功后直接生成报告）
     ) -> Generator[str, None, AnalysisResult]:
         """
         执行数据分析（流式输出）
@@ -1416,7 +1397,7 @@ class DataAnalysisGraph:
         
         每个请求使用独立的队列，确保多线程安全。
         
-        支持多轮分析：系统会自动评估分析完整性，如果需要更多分析，
+        支持多轮深度分析：系统会评估是否需继续分析，
         会继续生成代码并执行，直到分析完成或达到最大轮数。
         
         Args:
@@ -1456,6 +1437,7 @@ class DataAnalysisGraph:
                 debug_print_execution_output=debug_print_execution_output,  # 传递调试配置
                 max_analysis_rounds=max_analysis_rounds,  # 传递最大分析轮数
                 available_files=available_files,  # 传递多文件信息
+                enable_deep_analysis=enable_deep_analysis,
             )
             
             # 在后台线程中执行工作流
@@ -1570,7 +1552,7 @@ class DataAnalysisGraph:
             # 如果线程仍在运行，说明超时了
             if graph_thread.is_alive():
                 logger.warning(f"⚠️ 分析超时（{timeout_seconds}秒），强制结束 (request_id={request_id})")
-                yield f"\n\n⚠️ **分析超时**\n\n分析过程超过 {timeout_seconds} 秒，已自动终止。\n\n"
+                yield f"\n\n⚠️ **分析超时**\n\n本次分析用时较长（超过 {timeout_seconds} 秒），已自动结束。您仍可查看已生成的内容；若需完整结果，建议简化数据或分析需求后重试。\n\n"
                 # 注意：daemon 线程会在主线程退出时自动终止
             
             # 检查是否有错误

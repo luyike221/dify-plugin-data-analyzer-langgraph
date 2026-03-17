@@ -90,6 +90,22 @@ parameters:
       ja_JP: "オプション：処理するシート名を指定。指定しない場合、最初のシートが処理されます。処理出力で利用可能なシートを確認できます。"
     llm_description: "Optional sheet name to process. If not provided, the first sheet (active sheet) will be processed. Leave empty to use the default sheet."
     form: llm
+  - name: enable_deep_analysis
+    type: boolean
+    required: false
+    default: true
+    label:
+      en_US: "Enable Deep Analysis"
+      zh_Hans: "启用深度分析"
+      pt_BR: "Habilitar Análise Profunda"
+      ja_JP: "深度分析を有効にする"
+    human_description:
+      en_US: "When true, after each analysis round the system evaluates whether more analysis is needed (multi-round deep analysis). When false, after the first successful code execution it goes directly to report generation (single-round)."
+      zh_Hans: "为 true 时，每轮分析后会评估是否需继续分析（多轮深度分析）。为 false 时，首轮代码执行成功后直接生成报告（单轮）。"
+      pt_BR: "Quando true, após cada rodada o sistema avalia se mais análise é necessária (análise profunda em múltiplas rodadas). Quando false, após a primeira execução bem-sucedida vai direto para o relatório (rodada única)."
+      ja_JP: "trueの場合、各ラウンド後にさらに分析が必要か評価します（多段階の深度分析）。falseの場合、最初の実行成功後に直接レポート生成（1ラウンド）。"
+    llm_description: "If true, enable multi-round deep analysis; if false, generate report after first successful execution. Default: true."
+    form: form
 # 流式输出配置 - 支持在 Chatflow Answer 节点中使用打字机效果
 output_schema:
   type: object

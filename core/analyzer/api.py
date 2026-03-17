@@ -55,6 +55,8 @@ def analyze_excel_files_with_langgraph(
     max_analysis_rounds: int = 3,
     max_file_size_mb: Optional[int] = None,
     excel_processing_timeout: Optional[int] = None,
+    enable_deep_analysis: bool = True,
+    max_rows: Optional[int] = None,
 ) -> Generator[str, None, None]:
     """
     使用 LangGraph 分析 Excel 文件（流式版本）
@@ -132,7 +134,7 @@ def analyze_excel_files_with_langgraph(
             try:
                 validate_excel_file(filename, file_size, max_file_size_mb=max_file_size_mb)
             except ValueError as e:
-                yield f"❌ 文件验证失败: {str(e)}，跳过此文件\n\n"
+                yield f"❌ 该文件未通过验证（{str(e)}），已跳过。\n\n"
                 continue
             
             # 保存文件
@@ -161,11 +163,13 @@ def analyze_excel_files_with_langgraph(
                 excel_processing_timeout=excel_processing_timeout,
                 debug_print_header_analysis=debug_print_header_analysis,
                 thinking_callback=None,
-                max_file_size_mb=max_file_size_mb
+                max_file_size_mb=max_file_size_mb,
+                # 将最大行数限制传递给底层处理器，如果为 None 则在处理器中使用默认值
+                max_rows=max_rows,
             )
             
             if not process_result.success:
-                yield f"❌ Excel 处理失败: {process_result.error_message}，跳过此文件\n\n"
+                yield f"❌ 该文件处理失败，已跳过。请检查格式是否为支持的 Excel（.xlsx/.xls 等）。\n\n"
                 continue
             
             # 获取数据预览
@@ -186,7 +190,7 @@ def analyze_excel_files_with_langgraph(
             yield f"✅ 文件 {file_index} 预处理完成（数据行数: {process_result.row_count}）\n\n"
         
         if not processed_files_info:
-            yield "❌ 没有成功处理的文件，无法进行分析\n"
+            yield "❌ 暂无成功处理的文件，无法继续分析。请检查文件格式或重新上传后重试。\n"
             return
         
         yield f"✅ **所有文件预处理完成**（共 {len(processed_files_info)} 个文件）\n\n"
@@ -217,12 +221,13 @@ def analyze_excel_files_with_langgraph(
             debug_print_execution_output=debug_print_execution_output,
             max_analysis_rounds=max_analysis_rounds,
             available_files=processed_files_info,  # 传递所有文件信息
+            enable_deep_analysis=enable_deep_analysis,
         ):
             yield chunk
         
     except Exception as e:
-        import traceback
-        yield f"\n❌ 处理过程出错: {str(e)}\n{traceback.format_exc()}\n"
+        logger.error("处理过程出错: %s", e, exc_info=True)
+        yield "\n❌ 处理过程出错，请稍后重试或联系管理员。\n"
 
 
 def run_langgraph_analysis(
@@ -308,6 +313,7 @@ def run_langgraph_analysis_stream(
     debug_print_execution_output: bool = False,
     max_analysis_rounds: int = 3,
     available_files: Optional[List[Dict[str, Any]]] = None,
+    enable_deep_analysis: bool = True,
 ) -> Generator[str, None, None]:
     """
     使用 LangGraph 执行数据分析（流式输出）
@@ -331,6 +337,7 @@ def run_langgraph_analysis_stream(
         debug_print_execution_output=debug_print_execution_output,
         max_analysis_rounds=max_analysis_rounds,
         available_files=available_files,
+        enable_deep_analysis=enable_deep_analysis,
     ):
         yield chunk
 
@@ -412,6 +419,7 @@ def analyze_excel_with_langgraph(
     max_analysis_rounds: int = 3,
     max_file_size_mb: Optional[int] = None,
     excel_processing_timeout: Optional[int] = None,
+    max_rows: Optional[int] = None,
 ) -> Generator[str, None, None]:
     """
     使用 LangGraph 分析 Excel 文件（流式版本，兼容旧接口）
@@ -468,6 +476,7 @@ def analyze_excel_with_langgraph(
         max_analysis_rounds=max_analysis_rounds,
         max_file_size_mb=max_file_size_mb,
         excel_processing_timeout=excel_processing_timeout,
+        max_rows=max_rows,
     ):
         yield chunk
     # 导入必要的模块
@@ -488,7 +497,7 @@ def analyze_excel_with_langgraph(
     try:
         validate_excel_file(filename, file_size, max_file_size_mb=max_file_size_mb)
     except ValueError as e:
-        yield f"❌ 文件验证失败: {str(e)}\n"
+        yield f"❌ 该文件未通过验证（{str(e)}）。\n"
         return
     
     # 创建或获取会话
@@ -552,7 +561,7 @@ def analyze_excel_with_langgraph(
         )
         
         if not process_result.success:
-            yield f"❌ Excel 处理失败: {process_result.error_message}\n"
+            yield f"❌ 该文件处理失败。请检查格式是否为支持的 Excel（.xlsx/.xls 等）。\n"
             return
         
         yield f"✅ 表头分析完成，数据行数: {process_result.row_count}\n\n"
@@ -600,6 +609,6 @@ def analyze_excel_with_langgraph(
             yield chunk
         
     except Exception as e:
-        import traceback
-        yield f"\n❌ 处理过程出错: {str(e)}\n{traceback.format_exc()}\n"
+        logger.error("处理过程出错: %s", e, exc_info=True)
+        yield "\n❌ 处理过程出错，请稍后重试或联系管理员。\n"
 

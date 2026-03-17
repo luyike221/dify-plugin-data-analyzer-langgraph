@@ -18,7 +18,7 @@ class AnalysisPhase(str, Enum):
     CODE_GENERATION = "code_generation"
     CODE_EXECUTION = "code_execution"
     ERROR_FIXING = "error_fixing"
-    EVALUATE_COMPLETENESS = "evaluate_completeness"  # 评估分析完整性
+    EVALUATE_COMPLETENESS = "evaluate_completeness"  # 深度分析（多轮评估）
     REPORT_GENERATION = "report_generation"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -156,6 +156,7 @@ class AnalysisState(TypedDict, total=False):
     max_analysis_rounds: int  # 最大分析轮数（防止无限循环），默认3
     need_more_analysis: bool  # 是否需要更多分析
     all_execution_outputs: Annotated[List[str], operator.add]  # 所有轮次的执行结果
+    enable_deep_analysis: bool  # 是否启用深度分析（False 时执行成功后直接生成报告）
     
     # === 输出 ===
     report: str
@@ -180,6 +181,7 @@ def create_initial_state(
     debug_print_execution_output: bool = False,  # 是否在流式输出中打印代码执行结果
     max_analysis_rounds: int = 3,  # 最大分析轮数，防止无限循环
     available_files: Optional[List[Dict[str, Any]]] = None,  # 多文件场景：所有可用文件的信息
+    enable_deep_analysis: bool = True,  # 是否启用深度分析
 ) -> AnalysisState:
     """
     创建初始分析状态
@@ -265,6 +267,7 @@ def create_initial_state(
         max_analysis_rounds=max_analysis_rounds,
         need_more_analysis=False,
         all_execution_outputs=[],
+        enable_deep_analysis=enable_deep_analysis,
         
         # 输出
         report="",

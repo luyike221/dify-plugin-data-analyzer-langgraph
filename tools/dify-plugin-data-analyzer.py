@@ -293,6 +293,10 @@ class DifyPluginDataAnalyzerTool(Tool):
         use_llm_header_validation = tool_parameters.get("use_llm_header_validation", True)
         thread_id = tool_parameters.get("thread_id")  # 从工具参数获取会话ID（由Dify生成并传入）
         sheet_name = tool_parameters.get("sheet_name")  # 从工具参数获取工作表名称
+        # 深度分析：True 时多轮评估是否继续分析，False 时首轮成功后直接出报告
+        enable_deep_analysis = tool_parameters.get("enable_deep_analysis", tool_parameters.get("enable_completeness_evaluation", True))
+        if isinstance(enable_deep_analysis, str):
+            enable_deep_analysis = enable_deep_analysis.lower() in ("true", "1", "yes", "on")
         
         # 调试日志：打印接收到的所有参数
         logger.info(f"🔍 接收到的工具参数: {list(tool_parameters.keys())}")
@@ -589,6 +593,7 @@ class DifyPluginDataAnalyzerTool(Tool):
                     files_data=files_data,
                     analysis_api_url=analysis_api_url,
                     analysis_model=analysis_model,
+                    # 传递会话与分析配置
                     thread_id=thread_id,
                     use_llm_validate=use_llm_validate,
                     sheet_name=sheet_name,
@@ -605,6 +610,9 @@ class DifyPluginDataAnalyzerTool(Tool):
                     max_analysis_rounds=3,
                     max_file_size_mb=max_file_size_mb,
                     excel_processing_timeout=excel_processing_timeout,
+                    enable_deep_analysis=enable_deep_analysis,
+                    # 关键：将 provider 中的最大行数配置传递下去
+                    max_rows=max_rows,
                 ):
                     yield self.create_stream_variable_message('stream_output', chunk)
                     
