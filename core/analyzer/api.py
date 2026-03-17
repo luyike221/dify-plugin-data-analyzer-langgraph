@@ -291,6 +291,50 @@ def run_langgraph_analysis(
     }
 
 
+def run_langgraph_analysis_stream(
+    workspace_dir: str,
+    thread_id: str,
+    csv_path: str,
+    column_names: List[str],
+    column_metadata: Dict[str, Any],
+    row_count: int,
+    data_preview: str,
+    user_prompt: str,
+    api_url: str,
+    model: str,
+    api_key: Optional[str] = None,
+    temperature: float = 0.4,
+    analysis_timeout: Optional[int] = None,
+    debug_print_execution_output: bool = False,
+    max_analysis_rounds: int = 3,
+    available_files: Optional[List[Dict[str, Any]]] = None,
+) -> Generator[str, None, None]:
+    """
+    使用 LangGraph 执行数据分析（流式输出）
+    委托给 DataAnalysisGraph.analyze_stream，供多文件与单文件分析统一调用。
+    """
+    graph = DataAnalysisGraph()
+    for chunk in graph.analyze_stream(
+        workspace_dir=workspace_dir,
+        thread_id=thread_id,
+        csv_path=csv_path,
+        column_names=column_names,
+        column_metadata=column_metadata,
+        row_count=row_count,
+        data_preview=data_preview,
+        user_prompt=user_prompt,
+        api_url=api_url,
+        model=model,
+        api_key=api_key,
+        temperature=temperature,
+        analysis_timeout=analysis_timeout,
+        debug_print_execution_output=debug_print_execution_output,
+        max_analysis_rounds=max_analysis_rounds,
+        available_files=available_files,
+    ):
+        yield chunk
+
+
 def run_langgraph_analysis_stream_legacy(
     workspace_dir: str,
     thread_id: str,

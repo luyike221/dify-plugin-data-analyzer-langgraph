@@ -14,7 +14,12 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 
 # Import core functionality
 from core.excel_analyze_api import analyze_excel, analyze_excel_stream
-from core.config import DEFAULT_EXCEL_ANALYSIS_PROMPT, EXCEL_MAX_FILE_SIZE_MB
+from core.config import (
+    DEFAULT_EXCEL_ANALYSIS_PROMPT,
+    EXCEL_MAX_FILE_SIZE_MB,
+    EXCEL_VALID_EXTENSIONS,
+    EXCEL_VALID_MIME_TYPES,
+)
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -102,6 +107,28 @@ class DifyPluginDataAnalyzerTool(Tool):
         logger.debug(f"_is_dify_file: 不是 Dify File 对象")
         return False
     
+    def _is_excel_file(
+        self,
+        filename: str,
+        mime_type: Optional[str] = None,
+        extension: Optional[str] = None,
+    ) -> bool:
+        """
+        校验是否为支持的 Excel 文件（仅处理 .xlsx/.xls/.xlsm/.xlsb），
+        其他格式（如 PDF、Word 等）返回 False。
+        """
+        ext = (extension or "").strip().lower()
+        if not ext and filename:
+            ext = Path(filename).suffix.lower()
+        if ext and not ext.startswith("."):
+            ext = f".{ext}"
+        if ext not in EXCEL_VALID_EXTENSIONS:
+            return False
+        if mime_type:
+            if mime_type.strip().lower() not in [m.lower() for m in EXCEL_VALID_MIME_TYPES]:
+                return False
+        return True
+    
     def _get_file_from_dify_file(self, dify_file: Any, api_key: Optional[str] = None) -> tuple[bytes, str]:
         """
         从 Dify File 对象获取文件内容和文件名
@@ -152,22 +179,31 @@ class DifyPluginDataAnalyzerTool(Tool):
             logger.info(f"🌐 文件 URL: {url}")
             
             # 检查 URL 是否为相对路径，如果是，需要构建完整 URL
+            # 参考 dify-plugin-file-handling.md：url 可能是 "主机名/路径" 格式（如 localhost/files/xxx/file-preview?...）
+            # 文件接口在 /files/ 下，不在 /v1 下，必须用 FILES_URL 或去掉 /v1 的 DIFY_API_BASE_URL，且只取 path 部分拼接
             if url.startswith("http://") or url.startswith("https://"):
                 full_url = url
                 logger.info("✅ URL 是绝对路径，直接使用")
             else:
-                # 相对路径，需要加上基础 URL
-                # 尝试从环境变量获取 FILES_URL 或 DIFY_API_BASE_URL
-                files_base_url = os.environ.get("FILES_URL") or os.environ.get("DIFY_API_BASE_URL")
-                if files_base_url:
-                    if not files_base_url.startswith("http"):
-                        files_base_url = f"https://{files_base_url}"
-                    # 移除末尾的斜杠
-                    files_base_url = files_base_url.rstrip("/")
-                    # 确保 url 以斜杠开头
-                    if not url.startswith("/"):
-                        url = "/" + url
-                    full_url = f"{files_base_url}{url}"
+                # 相对路径：优先级 FILES_URL > DIFY_FILES_BASE_URL > DIFY_API_BASE_URL（需去掉 /v1）
+                base = (
+                    os.environ.get("FILES_URL")
+                    or os.environ.get("DIFY_FILES_BASE_URL")
+                    or os.environ.get("DIFY_API_BASE_URL")
+                )
+                if base:
+                    if not base.startswith("http"):
+                        base = f"http://{base}"
+                    base = base.rstrip("/")
+                    # 文件服务在 Web 根 /files/，不在 /v1 下，去掉 API 前缀
+                    if base.endswith("/v1"):
+                        base = base[:-3]
+                    # 拆分 "localhost/files/xxx" → 只保留 path 部分 "/files/xxx/..."
+                    if "/" in url and not url.startswith("/"):
+                        path = "/" + url.split("/", 1)[1]
+                    else:
+                        path = url if url.startswith("/") else "/" + url
+                    full_url = base + path
                     logger.info(f"🔧 URL 是相对路径，构建完整 URL: {full_url}")
                 else:
                     full_url = url
@@ -206,10 +242,11 @@ class DifyPluginDataAnalyzerTool(Tool):
         else:
             logger.warning(f"⚠️ 无法获取文件名，使用默认值: {filename}")
         
-        # 如果文件名没有扩展名，尝试从 extension 属性获取
+        # 如果文件名没有扩展名，尝试从 extension 属性获取（extension 可能带或不带点，统一去掉前导点再拼接）
         if hasattr(dify_file, "extension") and dify_file.extension:
-            if not filename.endswith(f".{dify_file.extension}"):
-                filename = f"{filename}.{dify_file.extension}"
+            ext = (dify_file.extension or "").lstrip(".")
+            if ext and not filename.endswith(f".{ext}"):
+                filename = f"{filename}.{ext}"
                 logger.info(f"📎 添加扩展名: {filename}")
         
         # 总结
@@ -444,6 +481,16 @@ class DifyPluginDataAnalyzerTool(Tool):
                 logger.info(f"🔍 检查输入文件类型 (文件 {file_index}/{total_files})...")
                 
                 if self._is_dify_file(input_file):
+                    # 先根据文件名/扩展名/MIME 校验是否为 Excel，避免下载 PDF 等
+                    _fname = getattr(input_file, "filename", "") or "uploaded_file"
+                    _mime = getattr(input_file, "mime_type", None)
+                    _ext = getattr(input_file, "extension", None)
+                    if not self._is_excel_file(_fname, mime_type=_mime, extension=_ext):
+                        yield self.create_stream_variable_message(
+                            'stream_output',
+                            f"⏭️ 仅支持 Excel 文件（.xlsx/.xls/.xlsm/.xlsb），已跳过: {_fname}\n"
+                        )
+                        continue
                     # 获取 Dify API Key
                     dify_api_key = None
                     if hasattr(self, 'runtime'):
@@ -514,6 +561,14 @@ class DifyPluginDataAnalyzerTool(Tool):
                 
                 if not filename:
                     filename = f"uploaded_file_{file_index}.xlsx"
+                
+                # 仅处理 Excel 文件，跳过 PDF、Word 等
+                if not self._is_excel_file(filename):
+                    yield self.create_stream_variable_message(
+                        'stream_output',
+                        f"⏭️ 仅支持 Excel 文件（.xlsx/.xls/.xlsm/.xlsb），已跳过: {filename}\n"
+                    )
+                    continue
                 
                 files_data.append({
                     "file_content": file_content,

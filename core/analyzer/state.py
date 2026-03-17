@@ -114,6 +114,8 @@ class AnalysisState(TypedDict, total=False):
     data_preview: str  # 当前使用的文件的数据预览
     user_prompt: str
     available_files: Optional[List[Dict[str, Any]]]  # 多文件场景：所有可用文件的信息列表
+    selected_files_info: Optional[List[Dict[str, Any]]]  # 策略制定后：被选中的文件详细信息列表
+    file_selection_reason: Optional[str]  # 选择文件的理由说明
     
     # === LLM 配置 ===
     api_url: str
@@ -222,6 +224,8 @@ def create_initial_state(
         data_preview=data_preview,
         user_prompt=user_prompt,
         available_files=available_files,  # 多文件信息
+        selected_files_info=None,  # 策略制定后填充
+        file_selection_reason=None,
         
         # LLM 配置
         api_url=api_url,

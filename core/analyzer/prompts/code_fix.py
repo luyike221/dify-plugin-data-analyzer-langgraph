@@ -4,7 +4,7 @@
 职责：修复执行失败的代码
 """
 
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
 
 
 # 代码修复 System Prompt
@@ -24,7 +24,7 @@ CODE_FIX_SYSTEM = """你是 Python 调试专家。请修复代码错误。
 ```
 """
 
-# 代码修复 User Prompt
+# 代码修复 User Prompt（单文件）
 CODE_FIX_USER = """## 原始代码
 
 ```python
@@ -45,22 +45,56 @@ CODE_FIX_USER = """## 原始代码
 请修复代码。
 """
 
+# 代码修复 User Prompt（多文件）
+CODE_FIX_USER_MULTI = """## 原始代码
+
+```python
+{original_code}
+```
+
+## 错误信息
+
+```
+{error_message}
+```
+
+## 可用数据文件
+
+{files_info}
+
+请修复代码。注意检查文件路径和列名是否正确。
+"""
+
 
 def format_code_fix_prompt(
     original_code: str,
     error_message: str,
     csv_path: str,
     column_names: List[str],
+    selected_files_info: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, str]]:
-    """格式化代码修复 Prompt"""
-    columns_str = ", ".join(column_names) if column_names else "未知"
-    
-    user_content = CODE_FIX_USER.format(
-        original_code=original_code,
-        error_message=error_message,
-        csv_path=csv_path,
-        column_names=columns_str,
-    )
+    """格式化代码修复 Prompt，支持多文件场景"""
+    if selected_files_info and len(selected_files_info) > 0:
+        files_parts = []
+        for i, f in enumerate(selected_files_info, 1):
+            fname = f.get("filename", f"文件{i}")
+            fpath = f.get("csv_path", "")
+            cols = ", ".join(f.get("column_names", []))
+            files_parts.append(f"### 文件 {i}: {fname}\n- 路径: `{fpath}`\n- 列名: {cols}")
+        files_info_str = "\n\n".join(files_parts)
+        user_content = CODE_FIX_USER_MULTI.format(
+            original_code=original_code,
+            error_message=error_message,
+            files_info=files_info_str,
+        )
+    else:
+        columns_str = ", ".join(column_names) if column_names else "未知"
+        user_content = CODE_FIX_USER.format(
+            original_code=original_code,
+            error_message=error_message,
+            csv_path=csv_path,
+            column_names=columns_str,
+        )
     
     return [
         {"role": "system", "content": CODE_FIX_SYSTEM},

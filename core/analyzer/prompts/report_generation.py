@@ -4,7 +4,7 @@
 职责：综合所有分析结果，生成最终报告
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional  # noqa: F811
 
 
 # 报告生成 System Prompt
@@ -103,16 +103,11 @@ REPORT_GENERATION_USER = """## 用户问题
 """
 
 
-def format_report_generation_prompt(
-    user_prompt: str,
-    analysis_type: str,
-    total_rounds: int,
-    all_results: str,
+def _format_single_file_metadata(
     column_names: List[str] = None,
     column_metadata: Dict[str, Any] = None,
-) -> List[Dict[str, str]]:
-    """格式化报告生成 Prompt"""
-    # 格式化列元数据信息
+) -> str:
+    """格式化单文件列元数据"""
     if column_metadata and isinstance(column_metadata, dict):
         metadata_lines = []
         for col_name, metadata in column_metadata.items():
@@ -131,11 +126,35 @@ def format_report_generation_prompt(
             else:
                 metadata_lines.append(f"- **{col_name}**: {metadata}")
         
-        column_metadata_info = "\n".join(metadata_lines) if metadata_lines else "无"
+        return "\n".join(metadata_lines) if metadata_lines else "无"
     elif column_names:
-        column_metadata_info = "列名：" + ", ".join(column_names)
+        return "列名：" + ", ".join(column_names)
     else:
-        column_metadata_info = "无"
+        return "无"
+
+
+def format_report_generation_prompt(
+    user_prompt: str,
+    analysis_type: str,
+    total_rounds: int,
+    all_results: str,
+    column_names: List[str] = None,
+    column_metadata: Dict[str, Any] = None,
+    selected_files_info: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, str]]:
+    """格式化报告生成 Prompt，支持多文件场景"""
+    # 如果有多文件信息，展示所有文件的元数据
+    if selected_files_info and len(selected_files_info) > 1:
+        parts = []
+        for i, f in enumerate(selected_files_info, 1):
+            fname = f.get("filename", f"文件{i}")
+            cols = f.get("column_names", [])
+            meta = f.get("column_metadata", {})
+            meta_str = _format_single_file_metadata(cols, meta)
+            parts.append(f"### 文件 {i}: {fname}\n{meta_str}")
+        column_metadata_info = "\n\n".join(parts)
+    else:
+        column_metadata_info = _format_single_file_metadata(column_names, column_metadata)
     
     user_content = REPORT_GENERATION_USER.format(
         user_prompt=user_prompt,

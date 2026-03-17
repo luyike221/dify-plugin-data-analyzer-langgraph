@@ -86,6 +86,13 @@ LANGGRAPH_MAX_ROUNDS = int(os.environ.get("LANGGRAPH_MAX_ROUNDS", "10"))
 
 # Excel processing configuration
 EXCEL_VALID_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.xlsb']
+# 用于校验 Dify 传入的 File 的 mime_type，仅处理 Excel
+EXCEL_VALID_MIME_TYPES = [
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # .xlsx
+    "application/vnd.ms-excel",  # .xls
+    "application/vnd.ms-excel.sheet.macroEnabled.12",  # .xlsm
+    "application/vnd.ms-excel.sheet.binary.macroEnabled.12",  # .xlsb
+]
 EXCEL_MAX_FILE_SIZE_MB = 100  # 最大文件大小（MB）
 EXCEL_MAX_ROWS_PREVIEW = 15   # 表头分析预览行数
 EXCEL_MAX_COLS_PREVIEW = 10   # 表头分析预览列数

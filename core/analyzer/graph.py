@@ -428,7 +428,8 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
     refined_query = strategy_result.get("refined_query", state["user_prompt"])
     tasks = strategy_result.get("tasks", [refined_query])
     first_task = strategy_result.get("first_task", tasks[0] if tasks else refined_query)
-    selected_files = strategy_result.get("selected_files", [])  # 多文件场景：LLM选择的文件
+    selected_files_paths = strategy_result.get("selected_files", [])  # LLM 返回的 csv_path 列表
+    file_selection_reason = strategy_result.get("file_selection_reason", "")
     
     strategy = {
         "type": analysis_type,
@@ -438,55 +439,52 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
         "completed_tasks": [],
         "needs_clarification": False,
         "clarification_message": None,
-        "selected_files": selected_files,  # 多文件场景：选择的文件路径列表
+        "selected_files": selected_files_paths,
     }
     
-    # 根据选择的文件更新状态中的当前文件信息
-    if selected_files:
-        # 找到第一个选择的文件（或使用第一个文件作为默认）
-        selected_file_info = None
-        for file_info in available_files:
-            if file_info.get("csv_path") in selected_files:
-                selected_file_info = file_info
-                break
-        
-        # 如果没找到，使用第一个文件
-        if not selected_file_info:
-            selected_file_info = available_files[0]
-            logger.warning(f"⚠️ [Node] 未找到选择的文件，使用第一个文件: {selected_file_info.get('filename')}")
-        
-        # 更新状态中的当前文件信息
-        state["csv_path"] = selected_file_info.get("csv_path", state["csv_path"])
-        state["column_names"] = selected_file_info.get("column_names", state["column_names"])
-        state["column_metadata"] = selected_file_info.get("column_metadata", state["column_metadata"])
-        state["row_count"] = selected_file_info.get("row_count", state["row_count"])
-        state["data_preview"] = selected_file_info.get("data_preview", state["data_preview"])
-        
-        logger.info(f"📁 [Node] 策略选择了文件: {selected_file_info.get('filename')}")
-        if len(selected_files) > 1:
-            logger.info(f"📁 [Node] 将使用多个文件进行分析: {[f.get('filename', '') for f in available_files if f.get('csv_path') in selected_files]}")
+    # 解析选中的文件，构建 selected_files_info（完整的文件信息列表）
+    # 空列表 = 使用所有文件
+    if not selected_files_paths:
+        resolved_files_info = list(available_files)
+        logger.info(f"📁 [Node] selected_files 为空，使用全部 {len(resolved_files_info)} 个文件")
     else:
-        # 如果没有选择文件，使用第一个文件（单文件场景）
-        if available_files:
-            first_file = available_files[0]
-            state["csv_path"] = first_file.get("csv_path", state["csv_path"])
-            state["column_names"] = first_file.get("column_names", state["column_names"])
-            state["column_metadata"] = first_file.get("column_metadata", state["column_metadata"])
-            state["row_count"] = first_file.get("row_count", state["row_count"])
-            state["data_preview"] = first_file.get("data_preview", state["data_preview"])
+        resolved_files_info = [
+            f for f in available_files
+            if f.get("csv_path") in selected_files_paths
+        ]
+        # 如果路径没匹配上（模型可能返回了文件名而非 csv_path），按文件名再试一次
+        if not resolved_files_info:
+            resolved_files_info = [
+                f for f in available_files
+                if f.get("filename") in selected_files_paths
+                or any(sp in (f.get("csv_path", "") or "") for sp in selected_files_paths)
+            ]
+        # 最终兜底：至少要有一个文件
+        if not resolved_files_info:
+            resolved_files_info = [available_files[0]]
+            logger.warning(f"⚠️ [Node] 未匹配到选择的文件 {selected_files_paths}，兜底使用第一个文件")
+    
+    # 用第一个选中文件作为 "主文件"（用于 csv_path 等单值字段）
+    primary_file = resolved_files_info[0]
+    updated_csv_path = primary_file.get("csv_path", state["csv_path"])
+    updated_column_names = primary_file.get("column_names", state["column_names"])
+    updated_column_metadata = primary_file.get("column_metadata", state["column_metadata"])
+    updated_row_count = primary_file.get("row_count", state["row_count"])
+    updated_data_preview = primary_file.get("data_preview", state["data_preview"])
+    
+    selected_filenames = [f.get("filename", "?") for f in resolved_files_info]
+    logger.info(f"📁 [Node] 选中 {len(resolved_files_info)} 个文件: {selected_filenames}")
+    if file_selection_reason:
+        logger.info(f"📁 [Node] 选择理由: {file_selection_reason}")
     
     # 根据策略任务数量动态调整最大轮数
     if analysis_type == "simple":
-        # 简单查询：1轮足够
         max_rounds = 1
     elif analysis_type == "overview":
-        # 概述分析：任务数 + 1（允许额外探索），最多5轮
         max_rounds = min(len(tasks) + 1, 5)
     elif analysis_type == "specific":
-        # 具体分析：任务数 + 1（允许深入挖掘），最多6轮
         max_rounds = min(len(tasks) + 1, 6)
     else:
-        # 默认：任务数，如果没有任务则使用默认值3
         max_rounds = len(tasks) if tasks else 3
     
     logger.info(f"✅ [Node] 策略制定完成")
@@ -494,10 +492,16 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
     logger.info(f"   - 分析任务: {tasks}")
     logger.info(f"   - 任务数量: {len(tasks)}")
     logger.info(f"   - 首个任务: {first_task}")
+    logger.info(f"   - 选中文件: {selected_filenames}")
     logger.info(f"   - 动态设置最大轮数: {max_rounds}")
     
-    # 输出分析策略
+    # 输出分析策略（流式推送给用户）
     _push_to_request_queue(request_id, f"**分析类型：** {analysis_type}\n\n")
+    if len(available_files) > 1:
+        _push_to_request_queue(request_id, f"**选用文件：** {', '.join(selected_filenames)}\n")
+        if file_selection_reason:
+            _push_to_request_queue(request_id, f"**选择理由：** {file_selection_reason}\n")
+        _push_to_request_queue(request_id, "\n")
     if tasks:
         _push_to_request_queue(request_id, "**分析策略：**\n")
         for i, task in enumerate(tasks, 1):
@@ -507,7 +511,15 @@ def plan_strategy_node(state: AnalysisState) -> Dict[str, Any]:
     return {
         "phase": AnalysisPhase.CODE_GENERATION.value,
         "analysis_strategy": strategy,
-        "max_analysis_rounds": max_rounds,  # 动态调整最大轮数
+        "max_analysis_rounds": max_rounds,
+        # 正确通过 return 传递状态更新（不能直接改 state）
+        "csv_path": updated_csv_path,
+        "column_names": updated_column_names,
+        "column_metadata": updated_column_metadata,
+        "row_count": updated_row_count,
+        "data_preview": updated_data_preview,
+        "selected_files_info": resolved_files_info,
+        "file_selection_reason": file_selection_reason,
         "messages": messages + [{"role": "assistant", "content": response}],
         "stream_output": [],
     }
@@ -546,63 +558,65 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
     logger.info(f"   - 首轮: {is_first_round}")
     logger.info(f"   - 当前任务: {current_task[:100]}...")
     
-    # 检查是否选择了多个文件进行分析
-    strategy = state.get("analysis_strategy", {})
-    selected_files = strategy.get("selected_files", [])
+    # 获取策略选中的文件信息（优先用 plan_strategy_node 返回的 selected_files_info）
+    selected_files_info = state.get("selected_files_info")
     available_files = state.get("available_files")
     
-    # 如果没有 available_files，构建单文件信息（兼容旧数据）
-    if not available_files:
-        available_files = [{
-            "filename": os.path.basename(state["csv_path"]),
-            "csv_path": state["csv_path"],
-            "row_count": state["row_count"],
-            "column_names": state["column_names"],
-            "column_metadata": state["column_metadata"],
-            "data_preview": state["data_preview"],
-        }]
+    # 兜底：如果 selected_files_info 为空，从 available_files 和策略重新构建
+    if not selected_files_info:
+        strategy = state.get("analysis_strategy", {})
+        selected_paths = strategy.get("selected_files", [])
+        if available_files and selected_paths:
+            selected_files_info = [
+                f for f in available_files if f.get("csv_path") in selected_paths
+            ]
+        if not selected_files_info and available_files:
+            selected_files_info = list(available_files)
+        elif not selected_files_info:
+            selected_files_info = [{
+                "filename": os.path.basename(state["csv_path"]),
+                "csv_path": state["csv_path"],
+                "row_count": state["row_count"],
+                "column_names": state["column_names"],
+                "column_metadata": state["column_metadata"],
+                "data_preview": state["data_preview"],
+            }]
     
-    # 判断是否选择了多个文件
-    is_multi_file_analysis = selected_files and len(selected_files) > 1
+    is_multi_file = len(selected_files_info) > 1
     
-    # 构建 prompt（区分首轮和后续轮，以及单文件和多文件）
-    if is_multi_file_analysis:
-        # 多文件场景：需要合并或对比分析
-        # 收集所有选择的文件信息
-        selected_files_info = []
-        for file_info in available_files:
-            if file_info.get("csv_path") in selected_files:
-                selected_files_info.append(file_info)
-        
-        # 构建多文件数据信息
-        from .prompts.data_info import format_multi_file_data_info
-        multi_file_data_info = format_multi_file_data_info(selected_files_info)
-        
-        # 修改 System Prompt 以支持多文件分析
-        multi_file_system_prompt = PromptTemplates.CODE_GENERATION_SYSTEM + """
+    # 构建 prompt
+    from .prompts.data_info import format_multi_file_data_info
+    
+    if is_multi_file:
+        # 多文件：提供所有选中文件的数据信息
+        data_info_text = format_multi_file_data_info(selected_files_info)
+        system_prompt = PromptTemplates.CODE_GENERATION_SYSTEM + """
 
 ## 多文件分析规则
 
-1. **文件读取**：使用 pandas 读取多个 CSV 文件
-2. **文件合并**：如果需要进行合并分析，使用 `pd.merge()` 或 `pd.concat()`
-3. **文件对比**：如果需要进行对比分析，分别读取文件后进行比较
-4. **文件路径**：使用上述提供的文件路径
+1. **文件读取**：使用 pandas 分别读取需要的 CSV 文件
+2. **文件合并**：如需合并，使用 `pd.merge()` 或 `pd.concat()`
+3. **文件对比**：如需对比，分别读取后进行比较
+4. **文件路径**：使用上面「可用数据文件」中提供的文件路径
+5. **按需使用**：不是每个文件都必须用到，根据任务需求选择
 """
-        
-        if is_first_round or not previous_results:
-            user_content = f"""{multi_file_data_info}
+    else:
+        # 单文件：只提供选中的那个文件的信息
+        f = selected_files_info[0]
+        data_info_text = format_multi_file_data_info(selected_files_info)
+        system_prompt = PromptTemplates.CODE_GENERATION_SYSTEM
+    
+    if is_first_round or not previous_results:
+        user_content = f"""{data_info_text}
 
 ## 分析任务
 
 {current_task}
 
-请编写 Python 代码完成此任务。注意：
-- 需要分析多个文件，请根据任务需求选择合适的文件
-- 可以进行文件合并、对比或分别分析
-- 所有结果必须通过 print() 输出，禁止硬编码结论
+请编写 Python 代码完成此任务。注意：所有结果必须通过 print() 输出，禁止硬编码结论。
 """
-        else:
-            user_content = f"""{multi_file_data_info}
+    else:
+        user_content = f"""{data_info_text}
 
 ## 之前的分析结果
 
@@ -617,13 +631,14 @@ def generate_code_node(state: AnalysisState) -> Dict[str, Any]:
 - 可以引用之前的发现进行深入分析
 - 所有结果通过 print() 输出
 """
-        
-        messages = [
-            {"role": "system", "content": multi_file_system_prompt},
-            {"role": "user", "content": user_content},
-        ]
-    else:
-        # 单文件场景：使用原有逻辑
+    
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+
+    if False:
+        # 保留原单文件 format 接口的占位，不再执行
         messages = PromptTemplates.format_code_generation_prompt(
             csv_path=state["csv_path"],
             row_count=state["row_count"],
@@ -837,12 +852,13 @@ def fix_code_node(state: AnalysisState) -> Dict[str, Any]:
     # 创建 LLM 客户端
     client = create_llm_client(state["api_url"], state.get("api_key"))
     
-    # 构建修复 prompt
+    # 构建修复 prompt（传入选中文件信息以便模型检查路径和列名）
     messages = PromptTemplates.format_code_fix_prompt(
         original_code=state["current_code"],
         error_message=state.get("error_message", "未知错误"),
         csv_path=state["csv_path"],
         column_names=state["column_names"],
+        selected_files_info=state.get("selected_files_info"),
     )
     
     # 收集流式输出的列表（用于后续格式化）
@@ -1093,7 +1109,7 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
             last_execution = state["execution_history"][-1]
             all_results = f"```\n{last_execution.output}\n```"
     
-    # 构建报告 prompt（使用新格式）
+    # 构建报告 prompt（传入多文件信息以便生成跨文件报告）
     messages = PromptTemplates.format_report_generation_prompt(
         user_prompt=state["user_prompt"],
         analysis_type=analysis_type,
@@ -1101,6 +1117,7 @@ def generate_report_node(state: AnalysisState) -> Dict[str, Any]:
         all_results=all_results,
         column_names=state.get("column_names", []),
         column_metadata=state.get("column_metadata", {}),
+        selected_files_info=state.get("selected_files_info"),
     )
     
     # 输出标题

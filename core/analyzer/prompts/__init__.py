@@ -166,10 +166,12 @@ class PromptTemplates:
         error_message: str,
         csv_path: str,
         column_names: List[str],
+        selected_files_info: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, str]]:
         """格式化代码修复 Prompt"""
         return format_code_fix_prompt(
-            original_code, error_message, csv_path, column_names
+            original_code, error_message, csv_path, column_names,
+            selected_files_info=selected_files_info,
         )
     
     @classmethod
@@ -198,11 +200,13 @@ class PromptTemplates:
         all_results: str,
         column_names: List[str] = None,
         column_metadata: Dict[str, Any] = None,
+        selected_files_info: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, str]]:
         """格式化报告生成 Prompt"""
         return format_report_generation_prompt(
             user_prompt, analysis_type, total_rounds, all_results,
-            column_names, column_metadata
+            column_names, column_metadata,
+            selected_files_info=selected_files_info,
         )
     
     @classmethod
